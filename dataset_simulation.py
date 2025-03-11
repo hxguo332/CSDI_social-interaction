@@ -1,12 +1,13 @@
-import pickle
 import os
 from torch.utils.data import DataLoader, Dataset
 import pandas as pd
 import numpy as np
-import torch
+import json
+from scenario_map import create_scenario_map
+
 
 class Simulation_Dataset(Dataset):
-    def __init__(self, data_length, scenario="1-1", data_folder=None, subset_split_seed=1, mode="train", missing_strategy="all_but_two_end", missing_ratio=0.1):
+    def __init__(self, data_length, scenario="1-1", data_folder=None, subset_split_seed=1, mode="train", missing_strategy="all_but_two_end", missing_ratio=0.1, load_scenario_map=False):
         self.data_length = data_length
         self.scenarios = ["1-1","2-1","2-2","2-3","3-1","3-2", "4-1"]
         self.missing_strategy = missing_strategy
@@ -26,6 +27,18 @@ class Simulation_Dataset(Dataset):
         self.subset_split_seed = subset_split_seed
         self.mode = mode
         self.data = self.split_data_in_subsets()
+
+        self.load_scenario_map = load_scenario_map
+        if self.load_scenario_map:
+            scen_map_json = self._load_scen_map(scenario)
+            self.scen_map = {scenario: create_scenario_map(scen_map_json, scale=10)}
+
+    def _load_scen_map(self, scenario):
+        assert scenario in self.scenarios, f"Scenario {scenario} is not available. Please choose from {self.scenarios}"
+        path = os.path.join(self.data_folder, f"Scenario{scenario}/scenario_map.json")
+        with open(path, "r") as f:
+            scenario_map = json.load(f)
+        return scenario_map
 
 
     def split_data_in_subsets(self):
@@ -201,18 +214,20 @@ class Simulation_Dataset(Dataset):
             'timepoints': np.arange(self.data_length), # should I use the actual timepoints or the index? 
             'person_ids': person_ids,
         }
+        if self.load_scenario_map:
+            s['scen_map'] = self.scen_map[self.scenario]
         return s
     def __len__(self):
         return len(self.data)
 
-def get_dataloader(data_length, seed, scenario="1-1",batch_size=8):
-    dataset = Simulation_Dataset(data_length, subset_split_seed=seed, scenario=scenario, mode='train')
+def get_dataloader(data_length, seed, scenario="1-1",batch_size=8, load_scenario_map=False):
+    dataset = Simulation_Dataset(data_length, subset_split_seed=seed, scenario=scenario, mode='train', load_scenario_map=load_scenario_map)
     train_loader = DataLoader(
         dataset, batch_size=batch_size, shuffle=1)
-    valid_dataset = Simulation_Dataset(data_length,subset_split_seed=seed, scenario=scenario, mode='valid')
+    valid_dataset = Simulation_Dataset(data_length,subset_split_seed=seed, scenario=scenario, mode='valid', load_scenario_map=load_scenario_map)
     valid_loader = DataLoader(
         valid_dataset, batch_size=batch_size, shuffle=0)
-    test_dataset = Simulation_Dataset(data_length,subset_split_seed=seed, scenario=scenario, mode='test')
+    test_dataset = Simulation_Dataset(data_length,subset_split_seed=seed, scenario=scenario, mode='test', load_scenario_map=load_scenario_map)
     test_loader = DataLoader(
         test_dataset, batch_size=batch_size, shuffle=0)
 
