@@ -2,6 +2,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from diff_models import diff_CSDI
+from scenario_map_embedding import ResnetMapEncoder
 
 
 class CSDI_base(nn.Module):
@@ -18,6 +19,8 @@ class CSDI_base(nn.Module):
         self.emb_total_dim = self.emb_time_dim + self.emb_feature_dim
         if self.is_unconditional == False:
             self.emb_total_dim += 1  # for conditional mask
+
+        # feature embedding
         self.embed_layer = nn.Embedding(
             num_embeddings=self.target_dim, embedding_dim=self.emb_feature_dim
         )
@@ -439,3 +442,128 @@ class CSDI_Forecasting(CSDI_base):
             samples = self.impute(observed_data, cond_mask, side_info, n_samples)
 
         return samples, observed_data, target_mask, observed_mask, observed_tp
+
+class CSDI_SimulationScenmap(CSDI_base):
+    def __init__(self, config, device, target_dim=2):
+        super(CSDI_base, self).__init__()
+        self.device = device
+        self.target_dim = target_dim
+
+        self.emb_time_dim = config["model"]["timeemb"]
+        self.emb_feature_dim = config["model"]["featureemb"]
+        self.is_unconditional = config["model"]["is_unconditional"]
+        self.target_strategy = config["model"]["target_strategy"]
+        # init the scenario map embedding layer
+        self.emb_scenmap_dim = config["model"]["scenmapemb"]
+
+        # TODO: add the shape of the scenario map
+        self.emb_total_dim = self.emb_time_dim + self.emb_feature_dim + self.emb_scenmap_dim # we can add the shape later
+        if self.is_unconditional == False:
+            self.emb_total_dim += 1  # for conditional mask
+
+        # use CNN to embed the scenario map
+        self.emb_scenmap = ResnetMapEncoder(output_dim=self.emb_scenmap_dim)
+
+        # feature embedding
+        self.embed_layer = nn.Embedding(
+            num_embeddings=self.target_dim, embedding_dim=self.emb_feature_dim
+        )
+
+        config_diff = config["diffusion"]
+        config_diff["side_dim"] = self.emb_total_dim
+
+        input_dim = 1 if self.is_unconditional == True else 2
+        self.diffmodel = diff_CSDI(config_diff, input_dim)
+
+        # parameters for diffusion models
+        self.num_steps = config_diff["num_steps"]
+        if config_diff["schedule"] == "quad":
+            self.beta = np.linspace(
+                config_diff["beta_start"] ** 0.5, config_diff["beta_end"] ** 0.5, self.num_steps
+            ) ** 2
+        elif config_diff["schedule"] == "linear":
+            self.beta = np.linspace(
+                config_diff["beta_start"], config_diff["beta_end"], self.num_steps
+            )
+
+        self.alpha_hat = 1 - self.beta
+        self.alpha = np.cumprod(self.alpha_hat)
+        self.alpha_torch = torch.tensor(self.alpha).float().to(self.device).unsqueeze(1).unsqueeze(1)
+
+    def get_side_info(self, observed_tp, cond_mask, scenmap):
+        B, K, L = cond_mask.shape
+
+        time_embed = self.time_embedding(observed_tp, self.emb_time_dim)  # (B,L,emb)
+        time_embed = time_embed.unsqueeze(2).expand(-1, -1, K, -1)
+        feature_embed = self.embed_layer(
+            torch.arange(self.target_dim).to(self.device)
+        )  # (K,emb)
+        feature_embed = feature_embed.unsqueeze(0).unsqueeze(0).expand(B, L, -1, -1)
+
+        side_info = torch.cat([time_embed, feature_embed], dim=-1)  # (B,L,K,*)
+        side_info = side_info.permute(0, 3, 2, 1)  # (B,*,K,L)
+
+        if self.is_unconditional == False:
+            side_mask = cond_mask.unsqueeze(1)  # (B,1,K,L)
+            side_info = torch.cat([side_info, side_mask], dim=1)
+
+        # get the scenario map embedding
+        scenmap_embed = self.emb_scenmap(scenmap) # (B, emb_scenmap_dim)
+        # convert the shape from (B, emb_scenmap_dim) to (B, emb_scenmap_dim, K, L)
+        scenmap_embed = scenmap_embed.unsqueeze(2).unsqueeze(2).expand(-1, -1, K, L)
+
+        side_info = torch.cat([side_info, scenmap_embed], dim=1)
+
+        
+
+        return side_info
+
+    def forward(self, batch, is_train=1):
+        (
+            observed_data,
+            observed_mask,
+            observed_tp,
+            gt_mask,
+            for_pattern_mask,
+            _,
+            scenmap,
+        ) = self.process_data(batch)
+        if is_train == 0:
+            cond_mask = gt_mask
+        elif self.target_strategy != "random":
+            cond_mask = self.get_hist_mask(
+                observed_mask, for_pattern_mask=for_pattern_mask
+            )
+        else:
+            cond_mask = self.get_randmask(observed_mask)
+
+        side_info = self.get_side_info(observed_tp, cond_mask, scenmap)
+
+        loss_func = self.calc_loss if is_train == 1 else self.calc_loss_valid
+
+        return loss_func(observed_data, cond_mask, observed_mask, side_info, is_train)
+
+    def process_data(self, batch):
+        observed_data = batch["observed_data"].to(self.device).float()
+        observed_mask = batch["observed_mask"].to(self.device).float()
+        observed_tp = batch["timepoints"].to(self.device).float()
+        gt_mask = batch["gt_mask"].to(self.device).float()
+        scenmap = batch["scen_map"].to(self.device).float() # N, H, W, C
+
+        observed_data = observed_data.permute(0, 2, 1)
+        observed_mask = observed_mask.permute(0, 2, 1)
+        gt_mask = gt_mask.permute(0, 2, 1)
+        scenmap = scenmap.permute(0, 3, 1, 2) # N, C, H, W
+
+        cut_length = torch.zeros(len(observed_data)).long().to(self.device)
+        for_pattern_mask = observed_mask
+
+        return (
+            observed_data,
+            observed_mask,
+            observed_tp,
+            gt_mask,
+            for_pattern_mask,
+            cut_length,
+            scenmap,
+        )

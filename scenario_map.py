@@ -1,7 +1,7 @@
 import numpy as np
 import cv2
 
-def world_to_grid(x, y, shape, height, scale):
+def world_to_grid(x, y, position, height, scale):
     """
     Convert world coordinates to grid indices.
     
@@ -11,15 +11,15 @@ def world_to_grid(x, y, shape, height, scale):
     Args:
         x (int): X-coordinate in world space.
         y (int): Y-coordinate in world space.
-        shape (dict): Bounding box of the scenario.
+        position (dict): Bounding box of the scenario.
         height (int): Height of the world in grid units.
         scale (int): Scaling factor (1 world unit = scale pixels).
 
     Returns:
         (int, int): Scaled grid coordinates.
     """
-    grid_x = (x - shape["p1"][0]) * scale
-    grid_y = (height - (y - shape["p1"][1])) * scale  # Flip Y-axis and scale
+    grid_x = (x - position["p1"][0]) * scale
+    grid_y = (height - (y - position["p1"][1])) * scale  # Flip Y-axis and scale
     return grid_x, grid_y
 
 def create_scenario_map(scenario, scale=10, ignroe_standing_person=True):
@@ -41,52 +41,52 @@ def create_scenario_map(scenario, scale=10, ignroe_standing_person=True):
         np.array: Generated map as a NumPy array.
     """
     # Get the bounding box of the shape (scaled)
-    width = (scenario["shape"]["p2"][0] - scenario["shape"]["p1"][0])
-    height = (scenario["shape"]["p2"][1] - scenario["shape"]["p1"][1])
+    width = (scenario["position"]["p2"][0] - scenario["position"]["p1"][0])
+    height = (scenario["position"]["p2"][1] - scenario["position"]["p1"][1])
     grid = np.full((height * scale, width * scale), 128, dtype=np.uint8)  # Default walkable (128)
     
     # Draw forbidden areas (0)
     for area in scenario["forbidden_area"]:
         if area["type"] == "rectangle":
-            x1, y1 = world_to_grid(*area["p1"], scenario["shape"], height, scale)
-            x2, y2 = world_to_grid(*area["p2"], scenario["shape"], height, scale)
+            x1, y1 = world_to_grid(*area["p1"], scenario["position"], height, scale)
+            x2, y2 = world_to_grid(*area["p2"], scenario["position"], height, scale)
             x_min, x_max = min(x1, x2), max(x1, x2)  # Ensure proper bounding
             y_min, y_max = min(y1, y2), max(y1, y2)
             grid[int(y_min):int(y_max)+1, int(x_min):int(x_max)+1] = 0  # Fill area with black (0)
         elif area["type"] == "polygon":
-            pts = np.array([world_to_grid(*pt, scenario["shape"], height, scale) for pt in area["points"]], np.int32)
+            pts = np.array([world_to_grid(*pt, scenario["position"], height, scale) for pt in area["points"]], np.int32)
             cv2.fillPoly(grid, [pts], 0)
 
     # Draw obstacles (0)
     for obstacle in scenario["obstacles"]:
         if obstacle["type"] == "rectangle":
-            x1, y1 = world_to_grid(*obstacle["p1"], scenario["shape"], height, scale)
-            x2, y2 = world_to_grid(*obstacle["p2"], scenario["shape"], height, scale)
+            x1, y1 = world_to_grid(*obstacle["p1"], scenario["position"], height, scale)
+            x2, y2 = world_to_grid(*obstacle["p2"], scenario["position"], height, scale)
             x_min, x_max = min(x1, x2), max(x1, x2)
             y_min, y_max = min(y1, y2), max(y1, y2)
             grid[int(y_min):int(y_max)+1, int(x_min):int(x_max)+1] = 0  # Fill area with black (0)
         elif obstacle["type"] == "circle":
-            cx, cy = world_to_grid(*obstacle["center"], scenario["shape"], height, scale)
+            cx, cy = world_to_grid(*obstacle["center"], scenario["position"], height, scale)
             radius = obstacle["radius"] * scale  # Scale the radius
             cv2.circle(grid, (int(cx), int(cy)), int(radius), 0, -1)  # Fill circle with black (0)
 
     # Draw walls (0)
     for wall in scenario["wall"]:
         (x1, y1), (x2, y2) = wall["segment"]
-        x1, y1 = world_to_grid(x1, y1, scenario["shape"], height, scale)
-        x2, y2 = world_to_grid(x2, y2, scenario["shape"], height, scale)
+        x1, y1 = world_to_grid(x1, y1, scenario["position"], height, scale)
+        x2, y2 = world_to_grid(x2, y2, scenario["position"], height, scale)
         cv2.line(grid, (int(x1), int(y1)), (int(x2), int(y2)), 0, 2)  # Thicker walls
 
     # Draw entrances (255)
     for entrance in scenario["entrance"]:
-        x1, y1 = world_to_grid(*entrance["p1"], scenario["shape"], height, scale)
-        x2, y2 = world_to_grid(*entrance["p2"], scenario["shape"], height, scale)
+        x1, y1 = world_to_grid(*entrance["p1"], scenario["position"], height, scale)
+        x2, y2 = world_to_grid(*entrance["p2"], scenario["position"], height, scale)
         cv2.line(grid, (int(x1), int(y1)), (int(x2), int(y2)), 255, 2)  # Thicker entrance
 
     # Draw standing persons (200)
     if not ignroe_standing_person:
         for person in scenario["standing_person"]:
-            x, y = world_to_grid(*person, scenario["shape"], height, scale)
+            x, y = world_to_grid(*person, scenario["position"], height, scale)
             cv2.circle(grid, (int(x), int(y)), scale//3, 200, -1)  # Draw person as a small circle
 
     return grid
@@ -95,6 +95,90 @@ def save_map(grid, filename="scenario_map_highres.png"):
     """Saves the generated map as an image file."""
     cv2.imwrite(filename, grid)
     print(f"Map saved as {filename}")
+
+def create_scenario_map_3channel(scenario, scale=10, draw_standing_person=False):
+    """
+    Generates a 3-channel high-resolution scenario map.
+    
+    **Channel Definitions:**
+    - **Channel 1 (Red) 🟥**: Obstacles (rectangles, circles) & optionally standing persons
+    - **Channel 2 (Green) 🟩**: Walls & forbidden areas
+    - **Channel 3 (Blue) 🟦**: Entrances
+
+    Args:
+        scenario (dict): Scenario definition containing obstacles, walls, entrances, etc.
+        scale (int, optional): Resolution scaling factor (default=10).
+        draw_standing_person (bool, optional): Whether to include standing persons in channel 1.
+
+    Returns:
+        np.array: Generated 3-channel scenario map as a NumPy array.
+    """
+    width = (scenario["position"]["p2"][0] - scenario["position"]["p1"][0])
+    height = (scenario["position"]["p2"][1] - scenario["position"]["p1"][1])
+    
+    # Create a 3-channel blank map (default all black)
+    grid = np.zeros((height * scale, width * scale, 3), dtype=np.uint8)
+
+    #print(f"Generated 3-channel map shape: {grid.shape} (Scale: {scale}x)")
+
+    # Draw forbidden areas (Green, Channel 2)
+    for area in scenario["forbidden_area"]:
+        if area["type"] == "rectangle":
+            x1, y1 = world_to_grid(*area["p1"], scenario["position"], height, scale)
+            x2, y2 = world_to_grid(*area["p2"], scenario["position"], height, scale)
+            x_min, x_max = min(x1, x2), max(x1, x2)
+            y_min, y_max = min(y1, y2), max(y1, y2)
+            grid[int(y_min):int(y_max)+1, int(x_min):int(x_max)+1, 1] = 255  # Green (Channel 2)
+        elif area["type"] == "polygon":
+            pts = np.array([world_to_grid(*pt, scenario["position"], height, scale) for pt in area["points"]], np.int32)
+            cv2.fillPoly(grid, [pts], (0, 255, 0))  # Green (Channel 2)
+
+    # Draw obstacles (Red, Channel 1)
+    for obstacle in scenario["obstacles"]:
+        if obstacle["type"] == "rectangle":
+            x1, y1 = world_to_grid(*obstacle["p1"], scenario["position"], height, scale)
+            x2, y2 = world_to_grid(*obstacle["p2"], scenario["position"], height, scale)
+            x_min, x_max = min(x1, x2), max(x1, x2)
+            y_min, y_max = min(y1, y2), max(y1, y2)
+            grid[int(y_min):int(y_max)+1, int(x_min):int(x_max)+1, 0] = 255  # Red (Channel 1)
+        elif obstacle["type"] == "circle":
+            cx, cy = world_to_grid(*obstacle["center"], scenario["position"], height, scale)
+            radius = obstacle["radius"] * scale
+            cv2.circle(grid, (int(cx), int(cy)), int(radius), (255, 0, 0), -1)  # Red (Channel 1)
+
+    # Draw walls (Green, Channel 2)
+    for wall in scenario["wall"]:
+        (x1, y1), (x2, y2) = wall["segment"]
+        x1, y1 = world_to_grid(x1, y1, scenario["position"], height, scale)
+        x2, y2 = world_to_grid(x2, y2, scenario["position"], height, scale)
+        cv2.line(grid, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)  # Green (Channel 2)
+
+    # Draw entrances (Blue, Channel 3)
+    for entrance in scenario["entrance"]:
+        x1, y1 = world_to_grid(*entrance["p1"], scenario["position"], height, scale)
+        x2, y2 = world_to_grid(*entrance["p2"], scenario["position"], height, scale)
+        cv2.line(grid, (int(x1), int(y1)), (int(x2), int(y2)), (0, 0, 255), 2)  # Blue (Channel 3)
+
+    # Draw standing persons (Red, Channel 1) if enabled
+    if draw_standing_person:
+        for person in scenario["standing_person"]:
+            x, y = world_to_grid(*person, scenario["position"], height, scale)
+            cv2.circle(grid, (int(x), int(y)), scale//3, (255, 0, 0), -1)  # Red (Channel 1)
+
+    return grid
+
+def save_map_3channel(grid, filename="scenario_map_3channel.png"):
+    """Saves the generated 3-channel map as an image file."""
+    cv2.imwrite(filename, grid)
+    print(f"3-Channel Map saved as {filename}")
+
+def display_map_3channel(grid):
+    import matplotlib.pyplot as plt
+    """Displays the generated 3-channel scenario map using matplotlib."""
+    plt.figure(figsize=(12, 6))
+    plt.imshow(cv2.cvtColor(grid, cv2.COLOR_BGR2RGB))  # Convert BGR to RGB for correct display
+    plt.title("3-Channel Scenario Map")
+    plt.show()
 
 if __name__ == "__main__":
     import json
@@ -120,11 +204,16 @@ if __name__ == "__main__":
             {"p1": (0, 9), "p2": (0, 15)},
             {"p1": (84, 9), "p2": (84, 15)},
         ],
-        "shape": {"p1": (0, 7), "p2": (84, 17)},
+        "position": {"p1": (0, 7), "p2": (84, 17)},
     }
-    #path = "data/simulation_data/Scenario1-1/scenario_map.json"
-    #scen_map_1_1 = json.load(open(path, "r"))
+    path = "data/simulation_data/Scenario1-1/scenario_map.json"
+    scen_map_example = json.load(open(path, "r"))
 
     scale_factor = 10
     grid_map = create_scenario_map(scen_map_example, scale=scale_factor)
     save_map(grid_map, "scenario_map_highres.png")
+
+    # Generate and save the 3-channel scenario map
+    grid_map_3channel = create_scenario_map_3channel(scen_map_example, scale=scale_factor, draw_standing_person=False)
+    save_map_3channel(grid_map_3channel, "scenario_map_3channel.png")
+    #display_map_3channel(grid_map_3channel)

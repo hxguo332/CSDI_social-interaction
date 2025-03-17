@@ -3,15 +3,30 @@ from torch.utils.data import DataLoader, Dataset
 import pandas as pd
 import numpy as np
 import json
-from scenario_map import create_scenario_map
+from scenario_map import create_scenario_map_3channel
 
 
 class Simulation_Dataset(Dataset):
-    def __init__(self, data_length, scenario="1-1", data_folder=None, subset_split_seed=1, mode="train", missing_strategy="all_but_two_end", missing_ratio=0.1, load_scenario_map=False):
+    def __init__(self, data_length, scenario="1-1", data_folder=None, subset_split_seed=1, mode="train", missing_strategy="all_but_two_end", missing_ratio=0.1, load_scenario_map=False, zero_based_position=False):
+        """
+        Args:
+            data_length (int): the length of the data sequence
+            scenario (str): the scenario to load data from
+            data_folder (str): the folder containing the data
+            subset_split_seed (int): the seed to split the data into train, valid and test
+            mode (str): the mode to load the data from ['train','valid','test']
+            missing_strategy (str): the missing strategy to create gt_masks
+            missing_ratio (float): the ratio of missing values to use
+            load_scenario_map (bool): whether to load the scenario map
+            zero_based_position (bool): whether the position is converted to zero-based according to the scenario map
+        """
         self.data_length = data_length
         self.scenarios = ["1-1","2-1","2-2","2-3","3-1","3-2", "4-1"]
         self.missing_strategy = missing_strategy
         self.missing_ratio = missing_ratio
+        self.zero_based_position = zero_based_position
+        self.origin_position = None
+        self.scenario = scenario
         if data_folder is None:
             self.data_folder = "./data/simulation_data/"
         else:
@@ -29,9 +44,9 @@ class Simulation_Dataset(Dataset):
         self.data = self.split_data_in_subsets()
 
         self.load_scenario_map = load_scenario_map
+        self.scen_map_info = self._load_scen_map(scenario)
         if self.load_scenario_map:
-            scen_map_json = self._load_scen_map(scenario)
-            self.scen_map = {scenario: create_scenario_map(scen_map_json, scale=10)}
+            self.scen_map = {scenario: create_scenario_map_3channel(self.scen_map_info, scale=10)}
 
     def _load_scen_map(self, scenario):
         assert scenario in self.scenarios, f"Scenario {scenario} is not available. Please choose from {self.scenarios}"
@@ -102,6 +117,13 @@ class Simulation_Dataset(Dataset):
         
         """
         observed_values = np.array(data[['posX','posY']])
+
+        # Convert the position to zero-based if needed
+        if self.zero_based_position:
+            if self.origin_position is None:
+                self.origin_position = np.array([min(self.scen_map_info['position']['p1'][0], self.scen_map_info['position']['p2'][0]), min(self.scen_map_info['position']['p1'][1], self.scen_map_info['position']['p2'][1])])
+            observed_values = observed_values - self.origin_position
+
         observed_masks = ~np.isnan(observed_values)
         observed_values = np.nan_to_num(observed_values)
 
@@ -220,14 +242,14 @@ class Simulation_Dataset(Dataset):
     def __len__(self):
         return len(self.data)
 
-def get_dataloader(data_length, seed, scenario="1-1",batch_size=8, load_scenario_map=False):
-    dataset = Simulation_Dataset(data_length, subset_split_seed=seed, scenario=scenario, mode='train', load_scenario_map=load_scenario_map)
+def get_dataloader(data_length, seed, scenario="1-1",batch_size=8, load_scenario_map=False, zero_based_position=False):
+    dataset = Simulation_Dataset(data_length, subset_split_seed=seed, scenario=scenario, mode='train', load_scenario_map=load_scenario_map, zero_based_position=zero_based_position)
     train_loader = DataLoader(
         dataset, batch_size=batch_size, shuffle=1)
-    valid_dataset = Simulation_Dataset(data_length,subset_split_seed=seed, scenario=scenario, mode='valid', load_scenario_map=load_scenario_map)
+    valid_dataset = Simulation_Dataset(data_length,subset_split_seed=seed, scenario=scenario, mode='valid', load_scenario_map=load_scenario_map, zero_based_position=zero_based_position)
     valid_loader = DataLoader(
         valid_dataset, batch_size=batch_size, shuffle=0)
-    test_dataset = Simulation_Dataset(data_length,subset_split_seed=seed, scenario=scenario, mode='test', load_scenario_map=load_scenario_map)
+    test_dataset = Simulation_Dataset(data_length,subset_split_seed=seed, scenario=scenario, mode='test', load_scenario_map=load_scenario_map, zero_based_position=zero_based_position)
     test_loader = DataLoader(
         test_dataset, batch_size=batch_size, shuffle=0)
 

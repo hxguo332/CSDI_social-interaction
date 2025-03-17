@@ -37,7 +37,7 @@ scen_map_1_1 = {"obstacles":[
             {"segment":[(0, 16), (0, 8)]},
     ],
     "entrance":[{ "p1": (0, 9), "p2": (0, 15)},{ "p1": (84, 9), "p2": (84, 15)}],
-    "shape":{"p1": (0, 7), "p2": (84, 17)}, # the coordinates of two corners of the scenario map
+    "position":{"p1": (0, 7), "p2": (84, 17)}, # the coordinates of two corners of the scenario map
 }
 
 if __name__ == "__main__":

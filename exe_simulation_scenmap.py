@@ -5,12 +5,12 @@ import json
 import yaml
 import os
 
-from main_model import CSDI_Simulation
+from main_model import CSDI_SimulationScenmap
 from dataset_simulation import get_dataloader
 from utils import train, evaluate
 
 parser = argparse.ArgumentParser(description="CSDI")
-parser.add_argument("--config", type=str, default="base.yaml")
+parser.add_argument("--config", type=str, default="base_scenmap.yaml")
 parser.add_argument('--device', default='cuda:0', help='Device for Attack')
 parser.add_argument("--seed", type=int, default=1)
 parser.add_argument("--testmissingratio", type=float, default=0.1)
@@ -42,11 +42,12 @@ train_loader, valid_loader, test_loader = get_dataloader(
     data_length=args.data_length,
     seed=args.seed,
     batch_size=config["train"]["batch_size"],
-    zero_based_position=True
+    zero_based_position=True,
+    load_scenario_map=True,
     #missing_ratio=config["model"]["test_missing_ratio"],
 )
 
-model = CSDI_Simulation(config, args.device).to(args.device)
+model = CSDI_SimulationScenmap(config, args.device).to(args.device)
 
 if args.modelfolder == "":
     train(
