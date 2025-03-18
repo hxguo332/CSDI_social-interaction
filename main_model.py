@@ -543,6 +543,29 @@ class CSDI_SimulationScenmap(CSDI_base):
 
         return loss_func(observed_data, cond_mask, observed_mask, side_info, is_train)
 
+    def evaluate(self, batch, n_samples):
+        (
+            observed_data,
+            observed_mask,
+            observed_tp,
+            gt_mask,
+            _,
+            cut_length,
+            scenmap,
+        ) = self.process_data(batch)
+
+        with torch.no_grad():
+            cond_mask = gt_mask
+            target_mask = observed_mask - cond_mask
+
+            side_info = self.get_side_info(observed_tp, cond_mask, scenmap)
+
+            samples = self.impute(observed_data, cond_mask, side_info, n_samples)
+
+            for i in range(len(cut_length)):  # to avoid double evaluation
+                target_mask[i, ..., 0 : cut_length[i].item()] = 0
+        return samples, observed_data, target_mask, observed_mask, observed_tp
+
     def process_data(self, batch):
         observed_data = batch["observed_data"].to(self.device).float()
         observed_mask = batch["observed_mask"].to(self.device).float()
