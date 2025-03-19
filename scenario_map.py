@@ -206,7 +206,8 @@ if __name__ == "__main__":
         ],
         "position": {"p1": (0, 7), "p2": (84, 17)},
     }
-    path = "data/simulation_data/Scenario1-1/scenario_map.json"
+    scen = '3-1'
+    path = f"data/simulation_data/Scenario{scen}/scenario_map.json"
     scen_map_example = json.load(open(path, "r"))
 
     scale_factor = 10
@@ -215,5 +216,5 @@ if __name__ == "__main__":
 
     # Generate and save the 3-channel scenario map
     grid_map_3channel = create_scenario_map_3channel(scen_map_example, scale=scale_factor, draw_standing_person=False)
-    save_map_3channel(grid_map_3channel, "scenario_map_3channel.png")
+    save_map_3channel(grid_map_3channel, f"scenario_{scen}_map_3channel.png")
     #display_map_3channel(grid_map_3channel)
