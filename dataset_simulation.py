@@ -1,5 +1,5 @@
 import os
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Sampler
 import pandas as pd
 import numpy as np
 import json
@@ -7,97 +7,41 @@ from scenario_map import create_scenario_map_3channel
 
 
 class Simulation_Dataset(Dataset):
-    def __init__(self, data_length, scenario="1-1", data_folder=None, subset_split_seed=1, mode="train", missing_strategy="all_but_two_end", missing_ratio=0.1, load_scenario_map=False, zero_based_position=False):
-        """
-        Args:
-            data_length (int): the length of the data sequence
-            scenario (str): the scenario to load data from
-            data_folder (str): the folder containing the data
-            subset_split_seed (int): the seed to split the data into train, valid and test
-            mode (str): the mode to load the data from ['train','valid','test']
-            missing_strategy (str): the missing strategy to create gt_masks
-            missing_ratio (float): the ratio of missing values to use
-            load_scenario_map (bool): whether to load the scenario map
-            zero_based_position (bool): whether the position is converted to zero-based according to the scenario map
-        """
+    def __init__(self, data_length, scenarios=None, data_folder=None, subset_split_seed=1, mode="train", missing_strategy="all_but_two_end", missing_ratio=0.1, load_scenario_map=False, zero_based_position=False):
         self.data_length = data_length
-        self.scenarios = ["1-1","2-1","2-2","2-3","3-1","3-2", "4-1"]
+        self.scenarios = scenarios if scenarios else ["1-1","2-1","2-2","2-3","3-1","3-2", "4-1"]
         self.missing_strategy = missing_strategy
         self.missing_ratio = missing_ratio
         self.zero_based_position = zero_based_position
-        self.origin_position = None
-        self.scenario = scenario
-        if data_folder is None:
-            self.data_folder = "./data/simulation_data/"
-        else:
-            self.data_folder = data_folder
-
-        person_info, sim_info = self._load_data(scenario)
-
-        # Remove the standing person and keep the data within the time limit
-        sim_info = self._filter_data(person_info, sim_info)
-
-        # Split the data
-        self.data = self._split_data(sim_info, data_length)
+        self.origin_position = {k: None for k in self.scenarios}
+        self.data_folder = data_folder or "./data/simulation_data/"
         self.subset_split_seed = subset_split_seed
         self.mode = mode
-        self.data = self.split_data_in_subsets()
-
         self.load_scenario_map = load_scenario_map
-        self.scen_map_info = self._load_scen_map(scenario)
-        if self.load_scenario_map:
-            self.scen_map = {scenario: create_scenario_map_3channel(self.scen_map_info, scale=10)}
+        self.data = {}
+        self.scen_map = {}
+        self.scen_map_info = {}
+
+        for scenario in self.scenarios:
+            person_info, sim_info = self._load_data(scenario)
+            sim_info = self._filter_data(person_info, sim_info)
+            self.data[scenario] = self._split_data(sim_info, data_length)
+            self.data[scenario] = self.split_data_in_subsets(self.data[scenario])
+
+            self.scen_map_info[scenario] = self._load_scen_map(scenario)
+            if self.load_scenario_map:
+                self.scen_map[scenario] = create_scenario_map_3channel(self._load_scen_map(scenario), scale=10)
 
     def _load_scen_map(self, scenario):
-        assert scenario in self.scenarios, f"Scenario {scenario} is not available. Please choose from {self.scenarios}"
+        assert scenario in self.scenarios, f"Scenario {scenario} is not available."
         path = os.path.join(self.data_folder, f"Scenario{scenario}/scenario_map.json")
         with open(path, "r") as f:
-            scenario_map = json.load(f)
-        return scenario_map
+            return json.load(f)
 
+    def __len__(self):
+        return sum([len(self.data[sc]) for sc in self.scenarios])
 
-    def split_data_in_subsets(self):
-        np.random.seed(self.subset_split_seed)
-        np.random.shuffle(self.data)
-        if self.mode == "train":
-            self.data = self.data[:int(0.7*len(self.data))]
-        elif self.mode == "valid":
-            self.data = self.data[int(0.7*len(self.data)):int(0.85*len(self.data))]
-        elif self.mode == "test":
-            self.data = self.data[int(0.85*len(self.data)):]
-        else:
-            raise ValueError(f"Mode {self.mode} is not available. Please choose from ['train','valid','test']")
-        return self.data
-
-
-    def _parse_all_data(self, data):
-        """
-        Parse the data to the desired format.
-        data (pd.DataFrame): have the following columns: time,personID,posX,posY
-        Output:
-            observed_values: np.array, shape: (T x N)
-            observed_masks: np.array, shape: (T x N)
-            gt_masks: np.array, shape: (T x N)
-            time_points: np.array, shape: (T)
-            person_ids: np.array, shape: (1)
-        
-        """
-        for i in range(len(self.data)):
-            if i == 0:
-                observed_values = np.array(data[i][['posX','posY']])
-                observed_masks = ~np.isnan(observed_values)
-                gt_masks = observed_masks.copy()
-                time_points = np.array(data[i]['time'])
-                person_ids = np.array(data[i]['personID'])
-            else:
-                observed_values = np.vstack((observed_values, np.array(data[i][['posX','posY']])))
-                observed_masks = np.vstack((observed_masks, np.array(data[i][['posX','posY']])))
-                gt_masks = np.vstack((gt_masks, np.array(data[i][['posX','posY']])))
-                time_points = np.hstack((time_points, np.array(data[i]['time'])))
-                person_ids = np.hstack((person_ids, np.array(data[i]['personID'])))
-        return observed_values, observed_masks, gt_masks, time_points, person_ids
-
-    def _parse_single_data(self, data, missing_strategy="random", missing_ratio=0.1):
+    def _parse_single_data(self, data, scenario, missing_strategy="random", missing_ratio=0.1):
         """
         Parse the data to the desired format.
         data (pd.DataFrame): have the following columns: time,personID,posX,posY
@@ -120,9 +64,9 @@ class Simulation_Dataset(Dataset):
 
         # Convert the position to zero-based if needed
         if self.zero_based_position:
-            if self.origin_position is None:
-                self.origin_position = np.array([min(self.scen_map_info['position']['p1'][0], self.scen_map_info['position']['p2'][0]), min(self.scen_map_info['position']['p1'][1], self.scen_map_info['position']['p2'][1])])
-            observed_values = observed_values - self.origin_position
+            if self.origin_position[scenario] is None:
+                self.origin_position[scenario] = np.array([min(self.scen_map_info[scenario]['position']['p1'][0], self.scen_map_info[scenario]['position']['p2'][0]), min(self.scen_map_info[scenario]['position']['p1'][1], self.scen_map_info[scenario]['position']['p2'][1])])
+            observed_values = observed_values - self.origin_position[scenario]
 
         observed_masks = ~np.isnan(observed_values)
         observed_values = np.nan_to_num(observed_values)
@@ -150,6 +94,18 @@ class Simulation_Dataset(Dataset):
         person_ids = np.array(data['personID'])
         person_ids = np.nan_to_num(person_ids)
         return observed_values, observed_masks, gt_masks, time_points, person_ids
+
+    def split_data_in_subsets(self, data):
+        np.random.seed(self.subset_split_seed)
+        np.random.shuffle(data)
+        if self.mode == "train":
+            return data[:int(0.7*len(data))]
+        elif self.mode == "valid":
+            return data[int(0.7*len(data)):int(0.85*len(data))]
+        elif self.mode == "test":
+            return data[int(0.85*len(data)):]
+        else:
+            raise ValueError(f"Mode {self.mode} is not available. Choose from ['train', 'valid', 'test']")
 
     def _split_data(self, sim_info, desired_length):
         """
@@ -213,21 +169,18 @@ class Simulation_Dataset(Dataset):
         assert scenario in self.scenarios, f"Scenario {scenario} is not available. Please choose from {self.scenarios}"
         if scenario == "4-1":
             path_sim = os.path.join(self.data_folder, "Scenario4-1/outputdata-1.6.2021/simulationLog_clean.csv")
-            path_info = os.path.join(self.data_folder, "data/simulation_data/Scenario4-1/outputdata-1.6.2021/outputPersonInfo_clean.csv")
+            path_info = os.path.join(self.data_folder, "Scenario4-1/outputdata-1.6.2021/outputPersonInfo_clean.csv")
         else:
             path_sim = os.path.join(self.data_folder, f"Scenario{scenario}/output data-2.15(yamada@vri)/simulationLog_clean.csv")
             path_info = os.path.join(self.data_folder,f"Scenario{scenario}/output data-2.15(yamada@vri)/outputPersonInfo_clean.csv")
         person_info = pd.read_csv(path_info)
         sim_info = pd.read_csv(path_sim)
         return person_info, sim_info
-
-    def _data_preprocessing(self, data):
-        """ Preprocess the data by normalizing the position"""
-        pass
         
     def __getitem__(self, index):
-        track = self.data[index]
-        observed_values, observed_masks, gt_masks, time_points, person_ids = self._parse_single_data(track, missing_ratio=self.missing_ratio, missing_strategy=self.missing_strategy)
+        index, scenario = self.get_index(index)
+        track = self.data[scenario][index]
+        observed_values, observed_masks, gt_masks, time_points, person_ids = self._parse_single_data(track, scenario, missing_ratio=self.missing_ratio, missing_strategy=self.missing_strategy)
         s = {
             'observed_data': observed_values,
             'observed_mask': observed_masks,
@@ -237,23 +190,86 @@ class Simulation_Dataset(Dataset):
             'person_ids': person_ids,
         }
         if self.load_scenario_map:
-            s['scen_map'] = self.scen_map[self.scenario]
+            s['scen_map'] = self.scen_map[scenario]
         return s
-    def __len__(self):
-        return len(self.data)
 
-def get_dataloader(data_length, seed, scenario="1-1",batch_size=8, load_scenario_map=False, zero_based_position=False):
-    dataset = Simulation_Dataset(data_length, subset_split_seed=seed, scenario=scenario, mode='train', load_scenario_map=load_scenario_map, zero_based_position=zero_based_position)
-    train_loader = DataLoader(
+    def get_index(self, index):
+        # given an index, return the scenario and the index in the scenario
+        for scenario in self.scenarios:
+            if index < len(self.data[scenario]):
+                return index, scenario
+            index -= len(self.data[scenario])
+        #raise ValueError(f"Index {index} is out of range.")
+
+    def __len__(self):
+        return sum([len(self.data[sc]) for sc in self.scenarios])
+
+def get_dataloader(data_length, seed, scenarios=None,batch_size=8, load_scenario_map=False, zero_based_position=False):
+    dataset = Simulation_Dataset(data_length, subset_split_seed=seed, scenarios=scenarios, mode='train', load_scenario_map=load_scenario_map, zero_based_position=zero_based_position)
+    train_loader = ScenarioBatchDataLoader(
         dataset, batch_size=batch_size, shuffle=1)
-    valid_dataset = Simulation_Dataset(data_length,subset_split_seed=seed, scenario=scenario, mode='valid', load_scenario_map=load_scenario_map, zero_based_position=zero_based_position)
-    valid_loader = DataLoader(
+    valid_dataset = Simulation_Dataset(data_length,subset_split_seed=seed, scenarios=scenarios, mode='valid', load_scenario_map=load_scenario_map, zero_based_position=zero_based_position)
+    valid_loader = ScenarioBatchDataLoader(
         valid_dataset, batch_size=batch_size, shuffle=0)
-    test_dataset = Simulation_Dataset(data_length,subset_split_seed=seed, scenario=scenario, mode='test', load_scenario_map=load_scenario_map, zero_based_position=zero_based_position)
-    test_loader = DataLoader(
+    test_dataset = Simulation_Dataset(data_length,subset_split_seed=seed, scenarios=scenarios, mode='test', load_scenario_map=load_scenario_map, zero_based_position=zero_based_position)
+    test_loader = ScenarioBatchDataLoader(
         test_dataset, batch_size=batch_size, shuffle=0)
 
     #scaler = torch.from_numpy(dataset.std_data).to(device).float()
     #mean_scaler = torch.from_numpy(dataset.mean_data).to(device).float()
 
     return train_loader, valid_loader, test_loader
+
+class ScenarioBatchDataLoader(DataLoader):
+    def __init__(self, dataset, batch_size=32, shuffle=True, **kwargs):
+        sampler = ScenarioBatchSampler(dataset, batch_size=batch_size, shuffle=shuffle)
+        super().__init__(dataset, batch_size=batch_size, sampler=sampler, **kwargs)
+
+class ScenarioBatchSampler(Sampler):
+    def __init__(self, dataset, batch_size, shuffle=True):
+        self.dataset = dataset
+        self.batch_size = batch_size
+        self.shuffle = shuffle
+        self.scenarios = dataset.scenarios
+        self.indices_by_scenario = {}
+        scenario_len = 0
+
+        for scenario in self.scenarios:
+            self.indices_by_scenario[scenario] = [
+                i for i in range(scenario_len, scenario_len + len(dataset.data[scenario]))
+            ]
+            scenario_len += len(dataset.data[scenario])
+
+        self.scenario_order = []  # Store the scenario order for the epoch
+        self._prepare_epoch()  # Prepare indices when sampler is initialized
+
+    def _prepare_epoch(self):
+        self.scenario_order = []
+
+        # For each scenario, generate all batches with padding if needed
+        for scenario, indices in self.indices_by_scenario.items():
+            if self.shuffle:
+                np.random.shuffle(indices)
+
+            # Padding if not divisible by batch_size
+            if len(indices) % self.batch_size != 0:
+                padding_size = self.batch_size - (len(indices) % self.batch_size)
+                indices += np.random.choice(indices, padding_size).tolist()
+
+            scenario_batches = [
+                indices[i:i + self.batch_size] for i in range(0, len(indices), self.batch_size)
+            ]
+            self.scenario_order += [(scenario, batch) for batch in scenario_batches]
+
+        # Shuffle the order of scenarios for each epoch
+        if self.shuffle:
+            np.random.shuffle(self.scenario_order)
+
+    def __iter__(self):
+        self._prepare_epoch()  # Prepare indices for the new epoch
+        for scenario, batch_indices in self.scenario_order:
+            for idx in batch_indices:
+                yield idx
+
+    def __len__(self):
+        return sum([len(batch_indices) for _, batch_indices in self.scenario_order])

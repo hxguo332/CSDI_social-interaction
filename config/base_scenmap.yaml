@@ -25,3 +25,6 @@ model:
   featureemb: 16
   scenmapemb: 256
   target_strategy: "random"
+
+dataset:
+  scenarios: null
