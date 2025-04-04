@@ -180,7 +180,16 @@ class Simulation_Dataset(Dataset):
     def __getitem__(self, index):
         index, scenario = self.get_index(index)
         track = self.data[scenario][index]
+
+        # Parse the track data to obtain:
+        # - observed_values: Nx2 numpy array of (x, y) positions
+        # - observed_masks: Nx2 boolean array indicating if data is observed (1) or missing (0)
+        # - gt_masks: Nx2 boolean array indicating the training target (1 for visible, 0 for prediction)
+        # - time_points: Array of time points corresponding to each observation
+        # - person_ids: Array containing IDs of the persons associated with the track
         observed_values, observed_masks, gt_masks, time_points, person_ids = self._parse_single_data(track, scenario, missing_ratio=self.missing_ratio, missing_strategy=self.missing_strategy)
+        
+        # Store all processed information in a dictionary
         s = {
             'observed_data': observed_values,
             'observed_mask': observed_masks,

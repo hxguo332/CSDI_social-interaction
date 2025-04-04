@@ -196,18 +196,23 @@ def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldernam
                 all_target, all_generated_samples, all_evalpoint, mean_scaler, scaler
             )
 
-            with open(
-                foldername + "/result_nsample" + str(nsample) + ".pk", "wb"
-            ) as f:
-                pickle.dump(
-                    [
-                        np.sqrt(mse_total / evalpoints_total),
-                        mae_total / evalpoints_total,
+            # TODO: change it to save in a csv file
+            result_path = foldername + "/result_nsample" + str(nsample) + ".csv"
+            RMSE = np.sqrt(mse_total / evalpoints_total)
+            MAE = mae_total / evalpoints_total
+
+            with open(result_path, "w") as f:
+                f.write("RMSE,MAE,CRPS,CRPS_sum\n")
+                f.write(
+                    "{},{},{},{}\n".format(
+                        RMSE,
+                        MAE,
                         CRPS,
-                    ],
-                    f,
+                        CRPS_sum,
+                    )
                 )
-                print("RMSE:", np.sqrt(mse_total / evalpoints_total))
-                print("MAE:", mae_total / evalpoints_total)
+                
+                print("RMSE:", RMSE)
+                print("MAE:", MAE)
                 print("CRPS:", CRPS)
                 print("CRPS_sum:", CRPS_sum)
