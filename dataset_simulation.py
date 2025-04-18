@@ -104,6 +104,9 @@ class Simulation_Dataset(Dataset):
             return data[int(0.7*len(data)):int(0.85*len(data))]
         elif self.mode == "test":
             return data[int(0.85*len(data)):]
+        elif self.mode == "unit_test":
+            # for unit test, we use the first 50 samples
+            return data[:20]
         else:
             raise ValueError(f"Mode {self.mode} is not available. Choose from ['train', 'valid', 'test']")
 
@@ -228,6 +231,12 @@ def get_dataloader(data_length, seed, scenarios=None,batch_size=8, load_scenario
     #mean_scaler = torch.from_numpy(dataset.mean_data).to(device).float()
 
     return train_loader, valid_loader, test_loader
+
+def get_unit_test_dataloader(data_length, seed, scenarios=None,batch_size=8, load_scenario_map=False, zero_based_position=False):
+    dataset = Simulation_Dataset(data_length, subset_split_seed=seed, scenarios=scenarios, mode='unit_test', load_scenario_map=load_scenario_map, zero_based_position=zero_based_position)
+    dataloader = ScenarioBatchDataLoader(
+        dataset, batch_size=batch_size, shuffle=1)
+    return dataloader
 
 class ScenarioBatchDataLoader(DataLoader):
     def __init__(self, dataset, batch_size=32, shuffle=True, **kwargs):

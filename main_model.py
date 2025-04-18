@@ -543,7 +543,7 @@ class CSDI_SimulationScenmap(CSDI_base):
 
         return loss_func(observed_data, cond_mask, observed_mask, side_info, is_train)
 
-    def evaluate(self, batch, n_samples):
+    def evaluate(self, batch, n_samples, return_scenmap=False):
         (
             observed_data,
             observed_mask,
@@ -564,7 +564,10 @@ class CSDI_SimulationScenmap(CSDI_base):
 
             for i in range(len(cut_length)):  # to avoid double evaluation
                 target_mask[i, ..., 0 : cut_length[i].item()] = 0
-        return samples, observed_data, target_mask, observed_mask, observed_tp
+        if return_scenmap:
+            return samples, observed_data, target_mask, observed_mask, observed_tp, scenmap
+        else:
+            return samples, observed_data, target_mask, observed_mask, observed_tp
 
     def process_data(self, batch):
         observed_data = batch["observed_data"].to(self.device).float()
