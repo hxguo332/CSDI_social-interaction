@@ -117,47 +117,275 @@ def calc_quantile_CRPS_sum(target, forecast, eval_points, mean_scaler, scaler):
         CRPS += q_loss / denom
     return CRPS.item() / len(quantiles)
 
-def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldername=""):
+def process_batch_data(output, return_scen_map):
+    """
+    Process and permute batch data for evaluation.
 
+    Args:
+        output: Output from the model's evaluation method.
+        return_scen_map: Whether scenario mapping is included in the output.
+
+    Returns:
+        Processed tensors for samples, target, eval_points, observed_points, and observed_time.
+    """
+    if return_scen_map:
+        samples, c_target, eval_points, observed_points, observed_time, scen_map = output
+    else:
+        samples, c_target, eval_points, observed_points, observed_time = output
+
+    # Permute dimensions for further processing
+    samples = samples.permute(0, 1, 3, 2)  # (B, nsample, L, K)
+    c_target = c_target.permute(0, 2, 1)  # (B, L, K)
+    eval_points = eval_points.permute(0, 2, 1)
+    observed_points = observed_points.permute(0, 2, 1)
+
+    if return_scen_map:
+        #scen_map = scen_map.permute(0, 2, 1)
+        return samples, c_target, eval_points, observed_points, observed_time, scen_map
+    else:
+        return samples, c_target, eval_points, observed_points, observed_time
+
+
+def compute_batch_metrics(samples_median, c_target, eval_points, scaler):
+    """
+    Compute MSE and MAE for a batch.
+
+    Args:
+        samples_median: Median of generated samples.
+        c_target: Ground truth target values.
+        eval_points: Evaluation points mask.
+        scaler: Scaling factor for the target values.
+
+    Returns:
+        mse_current: Mean Squared Error for the batch.
+        mae_current: Mean Absolute Error for the batch.
+    """
+    mse_current = (
+        ((samples_median - c_target) * eval_points) ** 2
+    ) * (scaler ** 2)
+    mae_current = (
+        torch.abs((samples_median - c_target) * eval_points)
+    ) * scaler
+
+    return mse_current.sum().item(), mae_current.sum().item()
+
+
+def save_generated_outputs(foldername, nsample, all_target, all_evalpoint, all_observed_point, all_observed_time, all_generated_samples, scaler, mean_scaler):
+    """
+    Save generated outputs to a pickle file.
+
+    Args:
+        foldername: Directory to save the file.
+        nsample: Number of samples generated.
+        all_target, all_evalpoint, all_observed_point, all_observed_time, all_generated_samples: Evaluation data.
+        scaler: Scaling factor for the target values.
+        mean_scaler: Mean scaler for the target values.
+    """
+    with open(foldername + f"/generated_outputs_nsample{nsample}.pk", "wb") as f:
+        pickle.dump(
+            [
+                all_generated_samples,
+                all_target,
+                all_evalpoint,
+                all_observed_point,
+                all_observed_time,
+                scaler,
+                mean_scaler,
+            ],
+            f,
+        )
+
+
+def compute_crps_metrics(all_target, all_generated_samples, all_evalpoint, mean_scaler, scaler):
+    """
+    Compute CRPS and CRPS_sum metrics.
+
+    Args:
+        all_target: Ground truth target values.
+        all_generated_samples: Generated samples from the model.
+        all_evalpoint: Evaluation points mask.
+        mean_scaler: Mean scaler for the target values.
+        scaler: Scaling factor for the target values.
+
+    Returns:
+        CRPS: Continuous Ranked Probability Score.
+        CRPS_sum: Summed CRPS metric.
+    """
+    CRPS = calc_quantile_CRPS(all_target, all_generated_samples, all_evalpoint, mean_scaler, scaler)
+    CRPS_sum = calc_quantile_CRPS_sum(all_target, all_generated_samples, all_evalpoint, mean_scaler, scaler)
+    return CRPS, CRPS_sum
+
+class CollisionEvaluator:
+    """
+    A class to compute and store collision metrics (collision rate and invalid rate)
+    across multiple batches, and calculate the average metrics at the end.
+
+    Attributes:
+        total_collisions (int): Total number of collisions across all batches.
+        total_paths (int): Total number of paths across all batches.
+        invalid_rate_all (list): List of invalid rates for each batch.
+        collisions_all (list): List of collision counts for each batch.
+    """
+
+    def __init__(self, scenmap_scale=10):
+        self.total_collisions = 0
+        self.total_paths = 0
+
+        self.invalid_rate_all = []
+        self.collisions_all = []
+
+        self.scenmap_scale = scenmap_scale
+
+    def update(self, samples_batch, scen_maps_batch, eval_points):
+        """
+        Update the collision metrics with a new batch of data.
+
+        Args:
+            samples_batch (torch.Tensor): Predicted paths. Shape: (batch_size, sample_length, 2).
+            scen_maps_batch (torch.Tensor): Scenario map with obstacles and forbidden areas.
+                - Channel 1 (Red): Obstacles (rectangles, circles) & optionally standing persons.
+                - Channel 2 (Green): Walls & forbidden areas.
+                - Channel 3 (Blue): Entrances.
+            eval_points (torch.Tensor): Evaluation points mask. Shape: (batch_size, sample_length, 2).
+        """
+        # Generate a mask for collisions
+        collision_mask = (scen_maps_batch[:, 0] > 0) | (scen_maps_batch[:, 1] > 0)
+
+        batch_size = samples_batch.shape[0]
+        sample_length = samples_batch.shape[1]
+        scenmap_scale = 10
+        # Get x and y coordinates, multiply eval_points to avoid out-of-bounds
+        x = (samples_batch[..., 0] * eval_points[..., 0]).long() * scenmap_scale  # Shape: (batch_size, sample_length)
+        # Do we need to reverse the y-axis?
+        # y = (samples_batch[..., 1] * eval_points[..., 1]).long() * scenmap_scale
+        y = ((scen_maps_batch.shape[2] - samples_batch[..., 1] * scenmap_scale) * eval_points[..., 1]).long()  # Shape: (batch_size, sample_length)
+
+        # Deal with out-of-bounds indices
+        # If the coordinates are out of bounds, they are collisons
+        collision_position = torch.logical_or(torch.logical_or(x<0, x>=scen_maps_batch.shape[2]), torch.logical_or(y<0, y>=scen_maps_batch.shape[3]))
+
+        # Ensure x and y are within the bounds of the scenario map
+        x = torch.clamp(x, 0, scen_maps_batch.shape[3] - 1)
+        y = torch.clamp(y, 0, scen_maps_batch.shape[2] - 1)
+
+        # Generate batch indices
+        batch_indices = torch.arange(batch_size).view(-1, 1).expand(-1, sample_length)  
+
+        # Check how many samples collide with obstacles under eval_points
+        collision = collision_mask[batch_indices, y, x] * eval_points[..., 0]  # Shape: (batch_size, sample_length)
+        collision = collision.bool() | collision_position  # Combine with collision_position
+
+        # Calculate collision rate for the batch, calculated by each sample
+        batch_collisions = torch.any(collision, dim=1).sum().item()  # Number of paths with at least one collision
+
+        # Calculate invalid rate for the batch
+        batch_invalid_steps = collision.sum(dim=-1)  # Total number of invalid steps
+        batch_total_steps = eval_points[...,0].sum(dim=-1)  # Total number of steps under eval_points
+
+        batch_invalid_rate = batch_invalid_steps / batch_total_steps  # Invalid rate for each path
+        # Handle NaN values
+        batch_invalid_rate[batch_total_steps == 0] = 0.0  # Set invalid rate to 0 if total steps is 0
+        batch_invalid_rate = batch_invalid_rate.tolist()  # Convert to list for easier handling
+
+        # Update the totals
+        self.invalid_rate_all.extend(batch_invalid_rate)
+        self.total_collisions += batch_collisions
+        self.total_paths += batch_size
+
+    def compute_metrics(self):
+        """
+        Compute the average collision rate and invalid rate across all batches.
+
+        Returns:
+            collision_rate (float): Average collision rate across all batches.
+            invalid_rate (float): Average invalid rate across all batches.
+        """
+        # Calculate the average collision rate across all batches
+        collision_rate = self.total_collisions / self.total_paths if self.total_paths > 0 else 0.0
+
+        # Calculate the average invalid rate across all batches
+        invalid_rate = np.mean(self.invalid_rate_all) if len(self.invalid_rate_all) > 0 else 0.0
+        return collision_rate, invalid_rate
+
+
+def save_evaluation_metrics(foldername, nsample, metrics_dict):
+    """
+    Save evaluation metrics to a CSV file.
+
+    Args:
+        foldername: Directory to save the file.
+        nsample: Number of samples generated.
+        metrics_dict: Dictionary containing evaluation metrics (RMSE, MAE, CRPS, etc.).
+    """
+    result_path = foldername + f"/result_nsample{nsample}.csv"
+    with open(result_path, "w") as f:
+        f.write("Metric,Value\n")
+        for key, value in metrics_dict.items():
+            f.write(f"{key},{value}\n")
+
+
+def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldername="", return_scen_map=False):
+    """
+    Evaluate the model on the test dataset and compute various metrics.
+
+    Args:
+        model: The trained model to evaluate.
+        test_loader: DataLoader for the test dataset.
+        nsample: Number of samples to generate for evaluation.
+        scaler: Scaling factor for the target values.
+        mean_scaler: Mean scaler for the target values.
+        foldername: Directory to save evaluation results and generated outputs.
+        return_scen_map: Whether scenario map is returned in each batch in dataloader (optional).
+
+    Returns:
+        None. Saves evaluation metrics and generated outputs to files.
+    """
     with torch.no_grad():
         model.eval()
-        mse_total = 0
-        mae_total = 0
-        evalpoints_total = 0
+        mse_total, mae_total, evalpoints_total = 0, 0, 0
 
-        all_target = []
-        all_observed_point = []
-        all_observed_time = []
-        all_evalpoint = []
-        all_generated_samples = []
+        if return_scen_map:
+            collision_evaluator = CollisionEvaluator()
+
+        all_target, all_observed_point, all_observed_time = [], [], []
+        all_evalpoint, all_generated_samples = [], []
+
         with tqdm(test_loader, mininterval=5.0, maxinterval=50.0) as it:
             for batch_no, test_batch in enumerate(it, start=1):
-                output = model.evaluate(test_batch, nsample)
 
-                samples, c_target, eval_points, observed_points, observed_time = output
-                samples = samples.permute(0, 1, 3, 2)  # (B,nsample,L,K)
-                c_target = c_target.permute(0, 2, 1)  # (B,L,K)
-                eval_points = eval_points.permute(0, 2, 1)
-                observed_points = observed_points.permute(0, 2, 1)
+                if return_scen_map:
+                    # Evaluate the model on the current batch
+                    output = model.evaluate(test_batch, nsample, return_scenmap=True)
+                    # Process batch data
+                    samples, c_target, eval_points, observed_points, observed_time, scen_map = process_batch_data(output, return_scen_map)
+                else:
+                    # Evaluate the model on the current batch
+                    output = model.evaluate(test_batch, nsample)
+                    # Process batch data
+                    samples, c_target, eval_points, observed_points, observed_time = process_batch_data(output, return_scen_map)
 
-                samples_median = samples.median(dim=1)
+                # Compute the median of the generated samples
+                samples_median = samples.median(dim=1).values
+                
+                if return_scen_map:
+                    collision_evaluator.update(samples_median, scen_map, eval_points)
+
+                # Append results to the respective lists
                 all_target.append(c_target)
                 all_evalpoint.append(eval_points)
                 all_observed_point.append(observed_points)
                 all_observed_time.append(observed_time)
                 all_generated_samples.append(samples)
 
-                mse_current = (
-                    ((samples_median.values - c_target) * eval_points) ** 2
-                ) * (scaler ** 2)
-                mae_current = (
-                    torch.abs((samples_median.values - c_target) * eval_points) 
-                ) * scaler
+                # Compute MSE and MAE for the current batch
+                mse_current, mae_current = compute_batch_metrics(samples_median, c_target, eval_points, scaler)
 
-                mse_total += mse_current.sum().item()
-                mae_total += mae_current.sum().item()
+                # Accumulate MSE, MAE, and evaluation points
+                mse_total += mse_current
+                mae_total += mae_current
                 evalpoints_total += eval_points.sum().item()
 
+                # Update progress bar
                 it.set_postfix(
                     ordered_dict={
                         "rmse_total": np.sqrt(mse_total / evalpoints_total),
@@ -167,52 +395,43 @@ def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldernam
                     refresh=True,
                 )
 
-            with open(
-                foldername + "/generated_outputs_nsample" + str(nsample) + ".pk", "wb"
-            ) as f:
-                all_target = torch.cat(all_target, dim=0)
-                all_evalpoint = torch.cat(all_evalpoint, dim=0)
-                all_observed_point = torch.cat(all_observed_point, dim=0)
-                all_observed_time = torch.cat(all_observed_time, dim=0)
-                all_generated_samples = torch.cat(all_generated_samples, dim=0)
+        # Save generated outputs
+        save_generated_outputs(foldername, nsample, torch.cat(all_target, dim=0), torch.cat(all_evalpoint, dim=0),
+                               torch.cat(all_observed_point, dim=0), torch.cat(all_observed_time, dim=0),
+                               torch.cat(all_generated_samples, dim=0), scaler, mean_scaler)
 
-                pickle.dump(
-                    [
-                        all_generated_samples,
-                        all_target,
-                        all_evalpoint,
-                        all_observed_point,
-                        all_observed_time,
-                        scaler,
-                        mean_scaler,
-                    ],
-                    f,
-                )
+        # Compute CRPS metrics
+        CRPS, CRPS_sum = compute_crps_metrics(torch.cat(all_target, dim=0), torch.cat(all_generated_samples, dim=0),
+                                              torch.cat(all_evalpoint, dim=0), mean_scaler, scaler)
+        # Compute collision metrics if applicable
 
-            CRPS = calc_quantile_CRPS(
-                all_target, all_generated_samples, all_evalpoint, mean_scaler, scaler
-            )
-            CRPS_sum = calc_quantile_CRPS_sum(
-                all_target, all_generated_samples, all_evalpoint, mean_scaler, scaler
-            )
 
-            # TODO: change it to save in a csv file
-            result_path = foldername + "/result_nsample" + str(nsample) + ".csv"
-            RMSE = np.sqrt(mse_total / evalpoints_total)
-            MAE = mae_total / evalpoints_total
+        # Save evaluation metrics
+        RMSE = np.sqrt(mse_total / evalpoints_total)
+        MAE = mae_total / evalpoints_total
+        if return_scen_map:
+            collision_rate, invalid_rate = collision_evaluator.compute_metrics()
+            print("Collision Rate:", collision_rate)
+            print("Invalid Rate:", invalid_rate)
+            metrics_dict = {
+                "RMSE": RMSE,
+                "MAE": MAE,
+                "CRPS": CRPS,
+                "CRPS_sum": CRPS_sum,
+                "Collision Rate": collision_rate,
+                "Invalid Rate": invalid_rate,
+            }
+        else:
+            metrics_dict = {
+                "RMSE": RMSE,
+                "MAE": MAE,
+                "CRPS": CRPS,
+                "CRPS_sum": CRPS_sum,
+            }
+        save_evaluation_metrics(foldername, nsample, metrics_dict)
 
-            with open(result_path, "w") as f:
-                f.write("RMSE,MAE,CRPS,CRPS_sum\n")
-                f.write(
-                    "{},{},{},{}\n".format(
-                        RMSE,
-                        MAE,
-                        CRPS,
-                        CRPS_sum,
-                    )
-                )
-                
-                print("RMSE:", RMSE)
-                print("MAE:", MAE)
-                print("CRPS:", CRPS)
-                print("CRPS_sum:", CRPS_sum)
+        # Print evaluation metrics
+        print("RMSE:", RMSE)
+        print("MAE:", MAE)
+        print("CRPS:", CRPS)
+        print("CRPS_sum:", CRPS_sum)
