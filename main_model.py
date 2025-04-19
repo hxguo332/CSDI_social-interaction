@@ -552,6 +552,7 @@ class CSDI_SimulationScenmap(CSDI_base):
             _,
             cut_length,
             scenmap,
+            scenmap_scales,
         ) = self.process_data(batch)
 
         with torch.no_grad():
@@ -565,7 +566,7 @@ class CSDI_SimulationScenmap(CSDI_base):
             for i in range(len(cut_length)):  # to avoid double evaluation
                 target_mask[i, ..., 0 : cut_length[i].item()] = 0
         if return_scenmap:
-            return samples, observed_data, target_mask, observed_mask, observed_tp, scenmap
+            return samples, observed_data, target_mask, observed_mask, observed_tp, scenmap, scenmap_scales
         else:
             return samples, observed_data, target_mask, observed_mask, observed_tp
 
@@ -575,6 +576,7 @@ class CSDI_SimulationScenmap(CSDI_base):
         observed_tp = batch["timepoints"].to(self.device).float()
         gt_mask = batch["gt_mask"].to(self.device).float()
         scenmap = batch["scen_map"].to(self.device).float() # N, H, W, C
+        scenmap_scales = batch["scen_map_scale"].to(self.device).float() # N
 
         observed_data = observed_data.permute(0, 2, 1)
         observed_mask = observed_mask.permute(0, 2, 1)
@@ -592,4 +594,5 @@ class CSDI_SimulationScenmap(CSDI_base):
             for_pattern_mask,
             cut_length,
             scenmap,
+            scenmap_scales,
         )

@@ -7,7 +7,7 @@ from scenario_map import create_scenario_map_3channel
 
 
 class Simulation_Dataset(Dataset):
-    def __init__(self, data_length, scenarios=None, data_folder=None, subset_split_seed=1, mode="train", missing_strategy="all_but_two_end", missing_ratio=0.1, load_scenario_map=False, zero_based_position=False):
+    def __init__(self, data_length, scenarios=None, data_folder=None, subset_split_seed=1, mode="train", missing_strategy="all_but_two_end", missing_ratio=0.1, load_scenario_map=False, zero_based_position=False, scen_map_scale=10):
         self.data_length = data_length
         self.scenarios = scenarios if scenarios else ["1-1","2-1","2-2","2-3","3-1","3-2", "4-1"]
         self.missing_strategy = missing_strategy
@@ -21,6 +21,7 @@ class Simulation_Dataset(Dataset):
         self.data = {}
         self.scen_map = {}
         self.scen_map_info = {}
+        self.scen_map_scale = scen_map_scale
 
         for scenario in self.scenarios:
             person_info, sim_info = self._load_data(scenario)
@@ -30,7 +31,7 @@ class Simulation_Dataset(Dataset):
 
             self.scen_map_info[scenario] = self._load_scen_map(scenario)
             if self.load_scenario_map:
-                self.scen_map[scenario] = create_scenario_map_3channel(self._load_scen_map(scenario), scale=10)
+                self.scen_map[scenario] = create_scenario_map_3channel(self._load_scen_map(scenario), scale=self.scen_map_scale)
 
     def _load_scen_map(self, scenario):
         assert scenario in self.scenarios, f"Scenario {scenario} is not available."
@@ -203,6 +204,7 @@ class Simulation_Dataset(Dataset):
         }
         if self.load_scenario_map:
             s['scen_map'] = self.scen_map[scenario]
+            s['scen_map_scale'] = self.scen_map_scale
         return s
 
     def get_index(self, index):

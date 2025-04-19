@@ -129,7 +129,7 @@ def process_batch_data(output, return_scen_map):
         Processed tensors for samples, target, eval_points, observed_points, and observed_time.
     """
     if return_scen_map:
-        samples, c_target, eval_points, observed_points, observed_time, scen_map = output
+        samples, c_target, eval_points, observed_points, observed_time, scen_map, scen_map_scale = output
     else:
         samples, c_target, eval_points, observed_points, observed_time = output
 
@@ -141,7 +141,7 @@ def process_batch_data(output, return_scen_map):
 
     if return_scen_map:
         #scen_map = scen_map.permute(0, 2, 1)
-        return samples, c_target, eval_points, observed_points, observed_time, scen_map
+        return samples, c_target, eval_points, observed_points, observed_time, scen_map, scen_map_scale
     else:
         return samples, c_target, eval_points, observed_points, observed_time
 
@@ -224,7 +224,6 @@ class CollisionEvaluator:
         total_collisions (int): Total number of collisions across all batches.
         total_paths (int): Total number of paths across all batches.
         invalid_rate_all (list): List of invalid rates for each batch.
-        collisions_all (list): List of collision counts for each batch.
     """
 
     def __init__(self, scenmap_scale=10):
@@ -232,11 +231,10 @@ class CollisionEvaluator:
         self.total_paths = 0
 
         self.invalid_rate_all = []
-        self.collisions_all = []
 
         self.scenmap_scale = scenmap_scale
 
-    def update(self, samples_batch, scen_maps_batch, eval_points):
+    def update(self, samples_batch, scen_maps_batch, eval_points, scenmap_scale):
         """
         Update the collision metrics with a new batch of data.
 
@@ -247,22 +245,29 @@ class CollisionEvaluator:
                 - Channel 2 (Green): Walls & forbidden areas.
                 - Channel 3 (Blue): Entrances.
             eval_points (torch.Tensor): Evaluation points mask. Shape: (batch_size, sample_length, 2).
+            scenmap_scale (int or torch.Tensor): Scale factor for the scenario map. Shape: (batch_size, 1) if it is torch.Tensor.
         """
         # Generate a mask for collisions
         collision_mask = (scen_maps_batch[:, 0] > 0) | (scen_maps_batch[:, 1] > 0)
 
         batch_size = samples_batch.shape[0]
         sample_length = samples_batch.shape[1]
-        scenmap_scale = 10
+
+        # Conver scenmap_scale to a long tensor
+        if not isinstance(scenmap_scale, torch.Tensor):
+            scenmap_scale = torch.full((batch_size, 1), scenmap_scale, device=samples_batch.device, dtype=samples_batch.dtype)
+        else:
+            scenmap_scale = scenmap_scale.view(batch_size, 1)
+
         # Get x and y coordinates, multiply eval_points to avoid out-of-bounds
-        x = (samples_batch[..., 0] * eval_points[..., 0]).long() * scenmap_scale  # Shape: (batch_size, sample_length)
+        x = ((samples_batch[..., 0] * eval_points[..., 0]) * scenmap_scale).long()  # Shape: (batch_size, sample_length)
         # Do we need to reverse the y-axis?
         # y = (samples_batch[..., 1] * eval_points[..., 1]).long() * scenmap_scale
         y = ((scen_maps_batch.shape[2] - samples_batch[..., 1] * scenmap_scale) * eval_points[..., 1]).long()  # Shape: (batch_size, sample_length)
 
         # Deal with out-of-bounds indices
         # If the coordinates are out of bounds, they are collisons
-        collision_position = torch.logical_or(torch.logical_or(x<0, x>=scen_maps_batch.shape[2]), torch.logical_or(y<0, y>=scen_maps_batch.shape[3]))
+        collision_position = torch.logical_or(torch.logical_or(x<0, x>=scen_maps_batch.shape[3]), torch.logical_or(y<0, y>=scen_maps_batch.shape[2]))
 
         # Ensure x and y are within the bounds of the scenario map
         x = torch.clamp(x, 0, scen_maps_batch.shape[3] - 1)
@@ -357,7 +362,7 @@ def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldernam
                     # Evaluate the model on the current batch
                     output = model.evaluate(test_batch, nsample, return_scenmap=True)
                     # Process batch data
-                    samples, c_target, eval_points, observed_points, observed_time, scen_map = process_batch_data(output, return_scen_map)
+                    samples, c_target, eval_points, observed_points, observed_time, scen_map, scen_maps_scale = process_batch_data(output, return_scen_map)
                 else:
                     # Evaluate the model on the current batch
                     output = model.evaluate(test_batch, nsample)
@@ -368,7 +373,7 @@ def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldernam
                 samples_median = samples.median(dim=1).values
                 
                 if return_scen_map:
-                    collision_evaluator.update(samples_median, scen_map, eval_points)
+                    collision_evaluator.update(samples_median, scen_map, eval_points, scen_maps_scale)
 
                 # Append results to the respective lists
                 all_target.append(c_target)
