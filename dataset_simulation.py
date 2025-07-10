@@ -21,7 +21,7 @@ class Simulation_Dataset(Dataset):
         self.data = {}
         self.scen_map = {}
         self.scen_map_info = {}
-        self.scen_map_scale = scen_map_scale
+        self.scen_map_base_scale = scen_map_scale # The base scale to create the scenario map
 
         for scenario in self.scenarios:
             person_info, sim_info = self._load_data(scenario)
@@ -31,7 +31,7 @@ class Simulation_Dataset(Dataset):
 
             self.scen_map_info[scenario] = self._load_scen_map(scenario)
             if self.load_scenario_map:
-                self.scen_map[scenario] = create_scenario_map_3channel(self._load_scen_map(scenario), scale=self.scen_map_scale)
+                self.scen_map[scenario] = create_scenario_map_3channel(self._load_scen_map(scenario), scale=self.scen_map_base_scale)
 
     def _load_scen_map(self, scenario):
         assert scenario in self.scenarios, f"Scenario {scenario} is not available."
@@ -114,6 +114,14 @@ class Simulation_Dataset(Dataset):
     def _split_data(self, sim_info, desired_length):
         """
         Split the data to the desired length, the split should keep the end of each track. Pad nan to data if the length is less than the desired length.
+        Args:
+            sim_info (pd.DataFrame): have the following columns: time,personID,posX,posY
+            desired_length (int): the desired length of the split data
+        Output:
+            splited_data (list of pd.DataFrame): each DataFrame has the same length,
+            and the length is equal to desired_length. If the length of the track is less than
+            desired_length, pad the data with NaN.
+            Each DataFrame has the following columns: time,personID,posX,posY
         """
         # Get the unique personIDs
         person_ids = sim_info['personID'].unique()
@@ -182,6 +190,7 @@ class Simulation_Dataset(Dataset):
         return person_info, sim_info
         
     def __getitem__(self, index):
+        rescale = False
         index, scenario = self.get_index(index)
         track = self.data[scenario][index]
 
@@ -204,7 +213,12 @@ class Simulation_Dataset(Dataset):
         }
         if self.load_scenario_map:
             s['scen_map'] = self.scen_map[scenario]
-            s['scen_map_scale'] = self.scen_map_scale
+            if not rescale:
+                # if there is no rescale for the scenario map, we use the original scale
+                s['scen_map_scale'] = np.full(2, self.scen_map_base_scale) # should be 2D
+            else:
+                # if there is a rescale for the scenario map, we use the rescaled scale
+                s['scen_map_scale'] = rescale
         return s
 
     def get_index(self, index):

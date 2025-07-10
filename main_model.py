@@ -455,9 +455,10 @@ class CSDI_SimulationScenmap(CSDI_base):
         self.target_strategy = config["model"]["target_strategy"]
         # init the scenario map embedding layer
         self.emb_scenmap_dim = config["model"]["scenmapemb"]
+        self.scale_dim = 2 # scale of the scenario map, x direction and y direction
 
         # TODO: add the shape of the scenario map
-        self.emb_total_dim = self.emb_time_dim + self.emb_feature_dim + self.emb_scenmap_dim # we can add the shape later
+        self.emb_total_dim = self.emb_time_dim + self.emb_feature_dim + self.emb_scenmap_dim + self.scale_dim# we can add the shape later
         if self.is_unconditional == False:
             self.emb_total_dim += 1  # for conditional mask
 
