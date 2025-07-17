@@ -7,7 +7,22 @@ from scenario_map import create_scenario_map_3channel
 
 
 class Simulation_Dataset(Dataset):
-    def __init__(self, data_length, scenarios=None, data_folder=None, subset_split_seed=1, mode="train", missing_strategy="all_but_two_end", missing_ratio=0.1, load_scenario_map=False, zero_based_position=False, scen_map_scale=10):
+    def __init__(self, data_length, scenarios=None, data_folder=None, subset_split_seed=1, mode="train", missing_strategy="all_but_two_end", missing_ratio=0.1, load_scenario_map=False, zero_based_position=True, scen_map_scale=10):
+        """
+        Simulation_Dataset is a dataset class for loading and processing simulation data.
+        Args:
+            data_length (int): The desired length of the data for each track.
+            scenarios (list): List of scenarios to load. If None, all scenarios are loaded.
+            data_folder (str): The folder where the simulation data is stored. If None, it defaults to "./data/simulation_data/".
+            subset_split_seed (int): The seed for splitting the dataset into subsets (train, valid, test).
+            mode (str): The mode of the dataset. Can be "train", "valid", "test", or "unit_test".
+            missing_strategy (str): The strategy to create ground truth masks for missing data.
+                Options: "random", "middle", "all_but_two_end", "end".
+            missing_ratio (float): The ratio of missing values to use when applying the missing strategy.
+            load_scenario_map (bool): Whether to load the scenario map for each scenario.
+            zero_based_position (bool): If True, positions will be adjusted to be zero-based. The scenario map is adjusted with zero-based positions by default. So set this to True if you need to use the scenario map.
+            scen_map_scale (int): The base scale to create the scenario map.
+        """
         self.data_length = data_length
         self.scenarios = scenarios if scenarios else ["1-1","2-1","2-2","2-3","3-1","3-2", "4-1"]
         self.missing_strategy = missing_strategy
