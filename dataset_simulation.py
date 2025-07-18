@@ -216,10 +216,11 @@ class Simulation_Dataset(Dataset):
         # - time_points: Array of time points corresponding to each observation
         # - person_ids: Array containing IDs of the persons associated with the track
         observed_values, observed_masks, gt_masks, time_points, person_ids = self._parse_single_data(track, scenario, missing_ratio=self.missing_ratio, missing_strategy=self.missing_strategy)
+
         
         # Store all processed information in a dictionary
         s = {
-            'observed_data': observed_values,
+            'observed_data': observed_values, # this is the left-down coordinates
             'observed_mask': observed_masks,
             'gt_mask': gt_masks,
             #'timepoints': time_points, # should I use the actual timepoints or the index? 
@@ -234,6 +235,10 @@ class Simulation_Dataset(Dataset):
             else:
                 # if there is a rescale for the scenario map, we use the rescaled scale
                 s['scen_map_scale'] = rescale
+            H = s['scen_map'].shape[0]
+            # convert observed values to left-top coordinates from the left-down coordinates
+            observed_values =self.convert_to_track_coordinates(observed_values, H)
+            s['observed_data'] = observed_values 
         return s
 
     def get_index(self, index):
@@ -246,6 +251,14 @@ class Simulation_Dataset(Dataset):
 
     def __len__(self):
         return sum([len(self.data[sc]) for sc in self.scenarios])
+
+    def convert_to_track_coordinates(self, observed_values, H):
+        """
+        Convert observed values to track coordinates by flipping the y-coordinate.
+        """
+        adjusted_values = observed_values.copy() * self.scen_map_base_scale
+        adjusted_values[:, 1] = H - adjusted_values[:, 1]
+        return adjusted_values
 
 def get_dataloader(data_length, seed, scenarios=None,batch_size=8, load_scenario_map=False, zero_based_position=False):
     dataset = Simulation_Dataset(data_length, subset_split_seed=seed, scenarios=scenarios, mode='train', load_scenario_map=load_scenario_map, zero_based_position=zero_based_position)

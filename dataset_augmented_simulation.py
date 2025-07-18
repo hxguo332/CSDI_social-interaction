@@ -90,20 +90,16 @@ class AugmentedSimulationDataset(Simulation_Dataset):
         # If the bounding box is too small, expand it to a minimum size
         min_size = 30  # Minimum size for the bounding box
         if bbox_w < min_size:
-            print(f"Original min_x: {min_x}, max_x: {max_x}, bbox_w: {bbox_w}")
             min_x -= max(0, (min_size - bbox_w) / 2)
             max_x += min(W, (min_size - bbox_w) / 2)
             bbox_w = max_x - min_x
-            print(f"Adjusted bbox width: {bbox_w} (min_x: {min_x}, max_x: {max_x})")
         if bbox_h < min_size:
-            print(f"Original min_y: {min_y}, max_y: {max_y}, bbox_h: {bbox_h}")
             min_y -= max(0, (min_size - bbox_h) / 2)
             max_y += min(H, (min_size - bbox_h) / 2)
             bbox_h = max_y - min_y
-            print(f"Adjusted bbox height: {bbox_h} (min_y: {min_y}, max_y: {max_y})")
 
 
-        scale_param = 1
+        scale_param = 10
         # Apply asymmetric random margins
         margin_left = random.randint(0, min(int(scale_param * bbox_w), int(min_x)))
         margin_right = random.randint(0, min(int(scale_param * bbox_w), int(W - max_x)))
@@ -157,16 +153,13 @@ class AugmentedSimulationDataset(Simulation_Dataset):
                 pad_top, pad_bottom,
                 pad_left, pad_right,
                 borderType=cv2.BORDER_CONSTANT,
-                value=0
+                value=(0,255,0) # padding green as non-walkable area
             )
         else:
             padded_map = cropped_map
-        print(f"Crop: ({left}, {top}) to ({right}, {bottom}), Padding: top={pad_top}, bottom={pad_bottom}, left={pad_left}, right={pad_right}")
-        print("padded map shape:", padded_map.shape)
+
         if padded_map.shape[0] == 0 or padded_map.shape[1] == 0:
-            print(f"Warning: Padded map has zero height or width. Crop: ({left}, {top}) to ({right}, {bottom}), Padding: top={pad_top}, bottom={pad_bottom}, left={pad_left}, right={pad_right}")
-            print(f"track range: x=({observed_values[:, 0].min()}, {observed_values[:, 0].max()}), y=({observed_values[:, 1].min()}, {observed_values[:, 1].max()})")
-        print("padded aspect ratio:", padded_map.shape[1] / padded_map.shape[0], "target aspect ratio:", desired_crop_size[1] / desired_crop_size[0])
+            raise ValueError("Padded map has zero height or width, check the crop parameters.")
 
         # Resize directly to target shape
         final_map = cv2.resize(padded_map, desired_crop_size[::-1], interpolation=cv2.INTER_LINEAR)
@@ -175,6 +168,8 @@ class AugmentedSimulationDataset(Simulation_Dataset):
         adjusted_values = observed_values * self.scen_map_base_scale 
         adjusted_values[:, 1] = H - adjusted_values[:, 1]  # Flip y-coordinate to match image coordinates
         adjusted_values = adjusted_values - np.array([left, top])  # Adjust for crop
+
+        # Add padding offsets
         adjusted_values[:, 0] += pad_left
         adjusted_values[:, 1] += pad_top
 
@@ -183,10 +178,13 @@ class AugmentedSimulationDataset(Simulation_Dataset):
         scale_y = desired_crop_size[0] / padded_map.shape[0]
         adjusted_values[:, 0] *= scale_x
         adjusted_values[:, 1] *= scale_y
-        print(f"Final map shape: {final_map.shape}, Crop size: {desired_crop_size}")
-        print(f"Scale: x={scale_x}, y={scale_y}")
 
-        return final_map, adjusted_values, (scale_x + scale_y) / 2  # average scale
+        if scale_x != scale_y:
+            print(f"Warning: Non-uniform scaling detected: scale_x={scale_x}, scale_y={scale_y}")
+
+        final_scale = self.scen_map_base_scale * (scale_x + scale_y) / 2  # Average scale factor
+
+        return final_map, adjusted_values, final_scale  # average scale
 
     def convert_to_track_coordinates(self, observed_values, H):
         """
@@ -199,6 +197,7 @@ class AugmentedSimulationDataset(Simulation_Dataset):
     def maybe_augment_sample(self, scen_map_raw, observed_values, observed_masks, desired_crop_size):
         """
         With 50% probability, apply nandom_crop_and_resize_with_track, otherwise return original data.
+        The retured scale here means the scale applied to the track coordinates. For example, if the coordinates is 10 times larger than the original, the scale will be 10.
         """
         if random.random() < 0.5:
             # Use original map and coordinates
