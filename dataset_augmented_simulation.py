@@ -63,132 +63,94 @@ class AugmentedSimulationDataset(Simulation_Dataset):
         }
         return s
 
-    def random_crop_and_resize_with_track(self, scen_map_raw, observed_values, observed_masks, desired_crop_size):
-        """
-        Crop the scenario map to cover the track (from observed_values) with an asymmetric random margin,
-        try to match the desired aspect ratio as closely as possible, pad if needed, and resize to desired_crop_size.
-        Adjust the track coordinates accordingly.
-        """
+    def crop_map_and_adjust_track(self, scen_map_raw, observed_values, observed_masks, desired_aspect, min_size=30):
         H, W, _ = scen_map_raw.shape
-
         masked_value = np.where(observed_masks, observed_values, np.nan)
+        min_x, min_y = np.nanmin(masked_value, axis=0)
+        max_x, max_y = np.nanmax(masked_value, axis=0)
 
-        # Bounding box around the track
-        min_x, min_y = np.nanmin(masked_value, axis=0) * self.scen_map_base_scale
-        max_x, max_y = np.nanmax(masked_value, axis=0) * self.scen_map_base_scale
-        min_y, max_y = H - max_y, H - min_y  # Flip y-coordinate to match image coordinates, the code need to be in the same line so that the min_y and max_y are flipped correctly
-
-        # Ensure min_x, max_x, min_y, max_y are integers
         min_x = np.floor(min_x)
         max_x = np.ceil(max_x)
         min_y = np.floor(min_y)
         max_y = np.ceil(max_y)
-
         bbox_w = max_x - min_x
         bbox_h = max_y - min_y
 
-        # If the bounding box is too small, expand it to a minimum size
-        min_size = 30  # Minimum size for the bounding box
         if bbox_w < min_size:
             min_x -= max(0, (min_size - bbox_w) / 2)
             max_x += min(W, (min_size - bbox_w) / 2)
-            bbox_w = max_x - min_x
         if bbox_h < min_size:
             min_y -= max(0, (min_size - bbox_h) / 2)
             max_y += min(H, (min_size - bbox_h) / 2)
-            bbox_h = max_y - min_y
-
 
         scale_param = 10
-        # Apply asymmetric random margins
         margin_left = random.randint(0, min(int(scale_param * bbox_w), int(min_x)))
         margin_right = random.randint(0, min(int(scale_param * bbox_w), int(W - max_x)))
         margin_top = random.randint(0, min(int(scale_param * bbox_h), int(min_y)))
         margin_bottom = random.randint(0, min(int(scale_param * bbox_h), int(H - max_y)))
 
-        # calculate the margin_right and margin_bottom to achieve the desired aspect ratio
-        target_aspect = desired_crop_size[1] / desired_crop_size[0]
+        target_aspect = desired_aspect
         current_aspect = (max_x - min_x + margin_left) / (max_y - min_y + margin_top)
         if current_aspect > target_aspect:
-            # Too wide: adjust margin_bottom to match target aspect ratio
             margin_bottom = int((max_x - min_x + margin_left + margin_right) / target_aspect - (max_y - min_y + margin_top))
-            margin_bottom = max(margin_bottom, 0)  # Ensure non-negative
         else:
-            # Too tall: adjust margin_right to match target aspect ratio
             margin_right = int((max_y - min_y + margin_top + margin_bottom) * target_aspect - (max_x - min_x + margin_left))
-            margin_right = max(margin_right, 0) # Ensure non-negative
 
-        # Proposed crop box
         left = max(int(min_x) - margin_left, 0)
         right = min(int(max_x) + margin_right, W)
         top = max(int(min_y) - margin_top, 0)
         bottom = min(int(max_y) + margin_bottom, H)
 
-        crop_w = right - left
-        crop_h = bottom - top
+        cropped_map = scen_map_raw[top:bottom, left:right]
+        adjusted_values = observed_values - np.array([left, top])
+        return cropped_map, adjusted_values, (top, left)
 
-        # Compute padding needed to achieve target aspect ratio
-        current_aspect = crop_w / crop_h if crop_h != 0 else 1.0
-        target_aspect = desired_crop_size[1] / desired_crop_size[0]
+    def pad_to_aspect_ratio(self, img, track, desired_aspect, pad_value=(0, 255, 0)):
+        h, w = img.shape[:2]
+        current_aspect = w / h if h != 0 else 1.0
 
-        pad_top, pad_bottom, pad_left, pad_right = 0, 0, 0, 0
-        if current_aspect > target_aspect:
-            # Too wide: pad height
-            target_crop_h = int(crop_w / target_aspect)
-            pad_total = max(target_crop_h - crop_h, 0)
+        pad_top = pad_bottom = pad_left = pad_right = 0
+        if current_aspect > desired_aspect:
+            target_h = int(w / desired_aspect)
+            pad_total = max(target_h - h, 0)
             pad_top = pad_total // 2
             pad_bottom = pad_total - pad_top
-        elif current_aspect < target_aspect:
-            # Too tall: pad width
-            target_crop_w = int(crop_h * target_aspect)
-            pad_total = max(target_crop_w - crop_w, 0)
+        elif current_aspect < desired_aspect:
+            target_w = int(h * desired_aspect)
+            pad_total = max(target_w - w, 0)
             pad_left = pad_total // 2
             pad_right = pad_total - pad_left
 
-        # Crop and pad
-        cropped_map = scen_map_raw[top:bottom, left:right]
         if pad_top > 0 or pad_bottom > 0 or pad_left > 0 or pad_right > 0:
-            padded_map = cv2.copyMakeBorder(
-                cropped_map,
-                pad_top, pad_bottom,
-                pad_left, pad_right,
-                borderType=cv2.BORDER_CONSTANT,
-                value=(0,255,0) # padding green as non-walkable area
-            )
-        else:
-            padded_map = cropped_map
+            img = cv2.copyMakeBorder(img, pad_top, pad_bottom, pad_left, pad_right, cv2.BORDER_CONSTANT, value=pad_value)
+            track[:, 0] += pad_left
+            track[:, 1] += pad_top
+        return img, track
 
-        if padded_map.shape[0] == 0 or padded_map.shape[1] == 0:
-            raise ValueError("Padded map has zero height or width, check the crop parameters.")
+    def resize_map_and_track(self, img, track, target_size):
+        scale_x = target_size[1] / img.shape[1]
+        scale_y = target_size[0] / img.shape[0]
+        track[:, 0] *= scale_x
+        track[:, 1] *= scale_y
+        img_resized = cv2.resize(img, target_size[::-1], interpolation=cv2.INTER_LINEAR)
+        return img_resized, track, (scale_x, scale_y)
 
-        # Resize directly to target shape
-        final_map = cv2.resize(padded_map, desired_crop_size[::-1], interpolation=cv2.INTER_LINEAR)
-
-        # Adjust track coordinates
-        adjusted_values = observed_values * self.scen_map_base_scale 
-        adjusted_values[:, 1] = H - adjusted_values[:, 1]  # Flip y-coordinate to match image coordinates
-        adjusted_values = adjusted_values - np.array([left, top])  # Adjust for crop
-
-        # Add padding offsets
-        adjusted_values[:, 0] += pad_left
-        adjusted_values[:, 1] += pad_top
-
-        # Compute rescale factor from padded crop to output
-        scale_x = desired_crop_size[1] / padded_map.shape[1]
-        scale_y = desired_crop_size[0] / padded_map.shape[0]
-        adjusted_values[:, 0] *= scale_x
-        adjusted_values[:, 1] *= scale_y
+    def random_crop_and_resize_with_track(self, scen_map_raw, observed_values, observed_masks, desired_crop_size):
+        observed_values = self.convert_to_track_coordinates(observed_values, scen_map_raw.shape[0])
+        aspect = desired_crop_size[1] / desired_crop_size[0]
+        cropped_map, track_adj, _ = self.crop_map_and_adjust_track(scen_map_raw, observed_values, observed_masks, aspect)
+        padded_map, track_padded = self.pad_to_aspect_ratio(cropped_map, track_adj, aspect)
+        final_map, track_resized, (scale_x, scale_y) = self.resize_map_and_track(padded_map, track_padded, desired_crop_size)
 
         if scale_x != scale_y:
             print(f"Warning: Non-uniform scaling detected: scale_x={scale_x}, scale_y={scale_y}")
 
-        final_scale = self.scen_map_base_scale * (scale_x + scale_y) / 2  # Average scale factor
-
-        return final_map, adjusted_values, final_scale  # average scale
+        final_scale = self.scen_map_base_scale * (scale_x + scale_y) / 2
+        return final_map, track_resized, final_scale
 
     def convert_to_track_coordinates(self, observed_values, H):
         """
-        Convert observed values to track coordinates by flipping the y-coordinate.
+        Convert observed values to track coordinates by transfer from left-down to right-down coordinates and scale it to the scenario map scale.
         """
         adjusted_values = observed_values.copy() * self.scen_map_base_scale
         adjusted_values[:, 1] = H - adjusted_values[:, 1]
@@ -200,10 +162,76 @@ class AugmentedSimulationDataset(Simulation_Dataset):
         The retured scale here means the scale applied to the track coordinates. For example, if the coordinates is 10 times larger than the original, the scale will be 10.
         """
         if random.random() < 0.5:
-            # Use original map and coordinates
-            observed_values = self.convert_to_track_coordinates(observed_values, scen_map_raw.shape[0])
-            # No augmentation applied, return original map and values
-            return scen_map_raw, observed_values, self.scen_map_base_scale # 1.0 scale means no scaling applied
+            #observed_values = self.convert_to_track_coordinates(observed_values, scen_map_raw.shape[0])
+            final_map, adjusted_values, scale = self.pad_and_resize_with_track(scen_map_raw, observed_values, desired_crop_size)
+
+            return final_map, adjusted_values, scale # 1.0 scale means no scaling applied
         else:
             final_map, adjusted_values, scale = self.random_crop_and_resize_with_track(scen_map_raw, observed_values, observed_masks, desired_crop_size)
             return final_map, adjusted_values, scale
+
+    def pad_and_resize_with_track(self, scen_map_raw, observed_values, desired_crop_size):
+        """
+        Pads the scenario map to the target aspect ratio and resizes it,
+        adjusting track coordinates accordingly.
+        """
+        # Convert coordinates
+        observed_values = self.convert_to_track_coordinates(observed_values, scen_map_raw.shape[0])
+
+        # Pad to aspect ratio
+        aspect = desired_crop_size[1] / desired_crop_size[0]
+        padded_map, track_padded = self.pad_to_aspect_ratio(scen_map_raw, observed_values.copy(), aspect)
+
+        # Resize
+        final_map, track_resized, (scale_x, scale_y) = self.resize_map_and_track(padded_map, track_padded, desired_crop_size)
+
+        if scale_x != scale_y:
+            print(f"Warning: Non-uniform scaling in pad_and_resize_with_track: scale_x={scale_x}, scale_y={scale_y}")
+
+        final_scale = self.scen_map_base_scale * (scale_x + scale_y) / 2
+        return final_map, track_resized, final_scale
+
+class ResizeWrapperDataset:
+    def __init__(self, base_dataset, resize_options):
+        self.base_dataset = base_dataset
+        self.resize_options = resize_options
+        self.current_resize_size = random.choice(self.resize_options)
+
+    def __getitem__(self, index):
+        self.base_dataset.resize_to = self.current_resize_size
+        return self.base_dataset[index]
+
+    def __len__(self):
+        return len(self.base_dataset)
+
+def get_augmented_dataloader(
+    data_length,
+    seed,
+    scenarios=None,
+    batch_size=8,
+    load_scenario_map=True,
+    zero_based_position=True,
+    resize_options=[(384, 384), (512, 512), (768, 768)],
+    augmentation_mode='crop_and_resize',
+    debug=False
+):
+    from torch.utils.data import DataLoader
+    def build_loader(mode):
+        base_dataset = AugmentedSimulationDataset(
+            data_length=data_length,
+            subset_split_seed=seed,
+            scenarios=scenarios,
+            mode=mode,
+            load_scenario_map=load_scenario_map,
+            zero_based_position=zero_based_position,
+            augmentation_mode=augmentation_mode,
+            debug=debug
+        )
+        wrapped_dataset = ResizeWrapperDataset(base_dataset, resize_options=resize_options)
+        return DataLoader(wrapped_dataset, batch_size=batch_size, shuffle=(mode == 'train'))
+
+    train_loader = build_loader("train")
+    valid_loader = build_loader("valid")
+    test_loader = build_loader("test")
+
+    return train_loader, valid_loader, test_loader
