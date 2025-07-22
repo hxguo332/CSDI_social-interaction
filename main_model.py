@@ -491,7 +491,9 @@ class CSDI_SimulationScenmap(CSDI_base):
         self.alpha = np.cumprod(self.alpha_hat)
         self.alpha_torch = torch.tensor(self.alpha).float().to(self.device).unsqueeze(1).unsqueeze(1)
 
-    def get_side_info(self, observed_tp, cond_mask, scenmap):
+    def get_side_info(self, observed_tp, cond_mask, scenmap, scenmap_scales):
+        # scenmap_scales shape: (B,2)
+        # K: number of features, L: number of time points
         B, K, L = cond_mask.shape
 
         time_embed = self.time_embedding(observed_tp, self.emb_time_dim)  # (B,L,emb)
@@ -515,7 +517,10 @@ class CSDI_SimulationScenmap(CSDI_base):
 
         side_info = torch.cat([side_info, scenmap_embed], dim=1)
 
-        
+        # scenmap_scales shape: (B, 2), we need to expand it to (B, 2, K, L)
+        extended_scenmap_scales = scenmap_scales.unsqueeze(-1).unsqueeze(-1).expand(-1, 2, K, L)
+        # add the scenario map scales to the side info
+        side_info = torch.cat([side_info, extended_scenmap_scales], dim=1)
 
         return side_info
 
@@ -528,6 +533,7 @@ class CSDI_SimulationScenmap(CSDI_base):
             for_pattern_mask,
             _,
             scenmap,
+            scenmap_scales,
         ) = self.process_data(batch)
         if is_train == 0:
             cond_mask = gt_mask
@@ -538,7 +544,7 @@ class CSDI_SimulationScenmap(CSDI_base):
         else:
             cond_mask = self.get_randmask(observed_mask)
 
-        side_info = self.get_side_info(observed_tp, cond_mask, scenmap)
+        side_info = self.get_side_info(observed_tp, cond_mask, scenmap, scenmap_scales)
 
         loss_func = self.calc_loss if is_train == 1 else self.calc_loss_valid
 
