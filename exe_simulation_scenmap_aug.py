@@ -6,7 +6,7 @@ import yaml
 import os
 
 from main_model import CSDI_SimulationScenmap
-from dataset_augmented_simulation import get_dataloader
+from dataset_augmented_simulation import get_augmented_dataloader
 from utils import train, evaluate
 
 def save_config(config, args):
@@ -53,7 +53,7 @@ if __name__ == "__main__":
     # Call the function to save the config and get the folder name
     foldername = save_config(config, args)
 
-    train_loader, valid_loader, test_loader = get_dataloader(
+    train_loader, valid_loader, test_loader = get_augmented_dataloader(
         scenarios=config["dataset"]["scenarios"],
         data_length=args.data_length,
         seed=args.seed,

@@ -75,19 +75,41 @@ class AugmentedSimulationDataset(Simulation_Dataset):
         max_y = np.ceil(max_y)
         bbox_w = max_x - min_x
         bbox_h = max_y - min_y
+        # Insert warning for invalid bbox
+        if bbox_w <= 0 or bbox_h <= 0:
+            print("Warning: Invalid bounding box dimensions.")
+            print(f"min_x = {min_x}, max_x = {max_x}, bbox_w = {bbox_w}")
+            print(f"min_y = {min_y}, max_y = {max_y}, bbox_h = {bbox_h}")
 
         if bbox_w < min_size:
             min_x -= max(0, (min_size - bbox_w) / 2)
             max_x += min(W, (min_size - bbox_w) / 2)
+            bbox_w = max_x - min_x
         if bbox_h < min_size:
             min_y -= max(0, (min_size - bbox_h) / 2)
             max_y += min(H, (min_size - bbox_h) / 2)
+            bbox_h = max_y - min_y
 
         scale_param = 10
-        margin_left = random.randint(0, min(int(scale_param * bbox_w), int(min_x)))
-        margin_right = random.randint(0, min(int(scale_param * bbox_w), int(W - max_x)))
-        margin_top = random.randint(0, min(int(scale_param * bbox_h), int(min_y)))
-        margin_bottom = random.randint(0, min(int(scale_param * bbox_h), int(H - max_y)))
+        margin_left_limit = min(int(scale_param * bbox_w), int(min_x))
+        margin_right_limit = min(int(scale_param * bbox_w), int(W - max_x))
+        margin_top_limit = min(int(scale_param * bbox_h), int(min_y))
+        margin_bottom_limit = min(int(scale_param * bbox_h), int(H - max_y))
+
+        # Debug only if any of the ranges are negative
+        if margin_left_limit < 0 or margin_right_limit < 0 or margin_top_limit < 0 or margin_bottom_limit < 0:
+            print("[DEBUG] Potential invalid randint range detected:")
+            print(f"  scale_param * bbox_w = {scale_param * bbox_w}")
+            print(f"  scale_param * bbox_h = {scale_param * bbox_h}")
+            print(f"  min_x = {min_x}, W - max_x = {W - max_x}")
+            print(f"  min_y = {min_y}, H - max_y = {H - max_y}")
+            print(f"  margin_left_limit = {margin_left_limit}, margin_right_limit = {margin_right_limit}")
+            print(f"  margin_top_limit = {margin_top_limit}, margin_bottom_limit = {margin_bottom_limit}")
+
+        margin_left = random.randint(0, max(0, margin_left_limit))
+        margin_right = random.randint(0, max(0, margin_right_limit))
+        margin_top = random.randint(0, max(0, margin_top_limit))
+        margin_bottom = random.randint(0, max(0, margin_bottom_limit))
 
         target_aspect = desired_aspect
         current_aspect = (max_x - min_x + margin_left) / (max_y - min_y + margin_top)
