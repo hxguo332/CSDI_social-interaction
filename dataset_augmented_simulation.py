@@ -17,7 +17,7 @@ class AugmentedSimulationDataset(Simulation_Dataset):
     def __init__(self, *args, augmentation_mode='crop_and_resize', resize_to=(128, 128), debug=False, **kwargs):
         super().__init__(*args, **kwargs)
         self.augmentation_mode = augmentation_mode
-        self.resize_to = resize_to
+        self.resize_to = resize_to # (height, width), this is not used if augmentation_mode is None
         self.debug = debug
         if not self.load_scenario_map:
             raise ValueError("AugmentedSimulationDataset requires load_scenario_map=True")
@@ -46,10 +46,28 @@ class AugmentedSimulationDataset(Simulation_Dataset):
                 if 0 <= x < scen_map_raw.shape[1] and 0 <= y < scen_map_raw.shape[0]:
                     cv2.circle(scen_map_raw, (int(x), int(y)), 13, (0, 0, 255), -1)
 
-        # Use maybe_augment_sample to get the processed scenario map and adjusted track data
-        scen_map_processed, adjusted_values, rescale = self.maybe_augment_sample(
-            scen_map_raw, observed_values, observed_masks, desired_crop_size
-        )
+        if self.augmentation_mode == 'crop_and_resize':
+            # Use maybe_augment_sample to get the processed scenario map and adjusted track data
+            scen_map_processed, adjusted_values, rescale = self.maybe_augment_sample(
+                scen_map_raw, observed_values, observed_masks, desired_crop_size
+            )
+            resize_shape = self.resize_to
+        elif self.augmentation_mode == 'pad_and_resize':
+            final_map, adjusted_values, scale = self.pad_and_resize_with_track(scen_map_raw, observed_values, desired_crop_size)
+            scen_map_processed = final_map
+            rescale = scale
+            resize_shape = self.resize_to
+
+            #return final_map, adjusted_values, scale # 1.0 scale means no scaling applied
+        elif self.augmentation_mode == None:
+            rescale = self.scen_map_base_scale
+            # convert the coordinates according to the scenario map size
+            adjusted_values = self.convert_to_track_coordinates(observed_values, scen_map_raw.shape[0])
+            scen_map_processed = scen_map_raw
+            resize_shape = (-1, -1) # Indicate no resizing applied
+        
+        # Try to make the rescale a number between 0 and 1
+        rescale = rescale / 100 # The scale is the real scale applied to the scenario map regarding the original scenario map size. (The original scenario map size should be based on the track coordinates)
 
         s = {
             'observed_data': adjusted_values,
@@ -59,11 +77,11 @@ class AugmentedSimulationDataset(Simulation_Dataset):
             'person_ids': person_ids,
             'scen_map': scen_map_processed,
             'scen_map_scale': np.full(2, rescale),
-            'resize_shape': self.resize_to
+            'resize_shape': resize_shape
         }
         return s
 
-    def crop_map_and_adjust_track(self, scen_map_raw, observed_values, observed_masks, desired_aspect, min_size=30):
+    def crop_map_and_adjust_track(self, scen_map_raw, observed_values, observed_masks, desired_aspect, min_bbox_ratio=0.15):
         H, W, _ = scen_map_raw.shape
         masked_value = np.where(observed_masks, observed_values, np.nan)
         min_x, min_y = np.nanmin(masked_value, axis=0)
@@ -81,14 +99,23 @@ class AugmentedSimulationDataset(Simulation_Dataset):
             print(f"min_x = {min_x}, max_x = {max_x}, bbox_w = {bbox_w}")
             print(f"min_y = {min_y}, max_y = {max_y}, bbox_h = {bbox_h}")
 
-        if bbox_w < min_size:
-            min_x -= max(0, (min_size - bbox_w) / 2)
-            max_x += min(W, (min_size - bbox_w) / 2)
+        # Ensure bbox is not too small compared to image size (using min_bbox_ratio)
+        min_bbox_w = int(min_bbox_ratio * W)
+        min_bbox_h = int(min_bbox_ratio * H)
+
+        if bbox_w < min_bbox_w:
+            diff = min_bbox_w - bbox_w
+            min_x -= diff / 2
+            max_x += diff / 2
             bbox_w = max_x - min_x
-        if bbox_h < min_size:
-            min_y -= max(0, (min_size - bbox_h) / 2)
-            max_y += min(H, (min_size - bbox_h) / 2)
+            #print(f"[Adjust bbox] Expanded bbox width to minimum {min_bbox_w:.1f}")
+
+        if bbox_h < min_bbox_h:
+            diff = min_bbox_h - bbox_h
+            min_y -= diff / 2
+            max_y += diff / 2
             bbox_h = max_y - min_y
+            #print(f"[Adjust bbox] Expanded bbox height to minimum {min_bbox_h:.1f}")
 
         scale_param = 10
         margin_left_limit = min(int(scale_param * bbox_w), int(min_x))
@@ -96,15 +123,15 @@ class AugmentedSimulationDataset(Simulation_Dataset):
         margin_top_limit = min(int(scale_param * bbox_h), int(min_y))
         margin_bottom_limit = min(int(scale_param * bbox_h), int(H - max_y))
 
-        # Debug only if any of the ranges are negative
-        if margin_left_limit < 0 or margin_right_limit < 0 or margin_top_limit < 0 or margin_bottom_limit < 0:
-            print("[DEBUG] Potential invalid randint range detected:")
-            print(f"  scale_param * bbox_w = {scale_param * bbox_w}")
-            print(f"  scale_param * bbox_h = {scale_param * bbox_h}")
-            print(f"  min_x = {min_x}, W - max_x = {W - max_x}")
-            print(f"  min_y = {min_y}, H - max_y = {H - max_y}")
-            print(f"  margin_left_limit = {margin_left_limit}, margin_right_limit = {margin_right_limit}")
-            print(f"  margin_top_limit = {margin_top_limit}, margin_bottom_limit = {margin_bottom_limit}")
+        ## Debug only if any of the ranges are negative
+        #if margin_left_limit < 0 or margin_right_limit < 0 or margin_top_limit < 0 or margin_bottom_limit < 0:
+        #    print("[DEBUG] Potential invalid randint range detected:")
+        #    print(f"  scale_param * bbox_w = {scale_param * bbox_w}")
+        #    print(f"  scale_param * bbox_h = {scale_param * bbox_h}")
+        #    print(f"  min_x = {min_x}, W - max_x = {W - max_x}")
+        #    print(f"  min_y = {min_y}, H - max_y = {H - max_y}")
+        #    print(f"  margin_left_limit = {margin_left_limit}, margin_right_limit = {margin_right_limit}")
+        #    print(f"  margin_top_limit = {margin_top_limit}, margin_bottom_limit = {margin_bottom_limit}")
 
         margin_left = random.randint(0, max(0, margin_left_limit))
         margin_right = random.randint(0, max(0, margin_right_limit))
@@ -122,6 +149,10 @@ class AugmentedSimulationDataset(Simulation_Dataset):
         right = min(int(max_x) + margin_right, W)
         top = max(int(min_y) - margin_top, 0)
         bottom = min(int(max_y) + margin_bottom, H)
+
+        # Insert validation before return
+        if bottom <= top or right <= left:
+            raise ValueError(f"Invalid crop box: top={top}, bottom={bottom}, left={left}, right={right}")
 
         cropped_map = scen_map_raw[top:bottom, left:right]
         adjusted_values = observed_values - np.array([left, top])
@@ -150,10 +181,15 @@ class AugmentedSimulationDataset(Simulation_Dataset):
         return img, track
 
     def resize_map_and_track(self, img, track, target_size):
+        if img.shape[0] == 0 or img.shape[1] == 0:
+            raise ValueError("Cannot resize image with zero dimension.")
         scale_x = target_size[1] / img.shape[1]
         scale_y = target_size[0] / img.shape[0]
         track[:, 0] *= scale_x
         track[:, 1] *= scale_y
+        # Check for NaN or Inf in track
+        if np.isnan(track).any() or np.isinf(track).any():
+            raise ValueError("NaN or Inf detected in track after resizing.")
         img_resized = cv2.resize(img, target_size[::-1], interpolation=cv2.INTER_LINEAR)
         return img_resized, track, (scale_x, scale_y)
 
@@ -167,7 +203,22 @@ class AugmentedSimulationDataset(Simulation_Dataset):
         if scale_x != scale_y:
             print(f"Warning: Non-uniform scaling detected: scale_x={scale_x}, scale_y={scale_y}")
 
+        # Insert NaN/Inf and empty image checks before return
+        if np.isnan(track_resized).any() or np.isinf(track_resized).any():
+            raise ValueError("NaN or Inf detected in resized track!")
+        if final_map.size == 0:
+            raise ValueError("Empty image after crop!")
+
         final_scale = self.scen_map_base_scale * (scale_x + scale_y) / 2
+        # print(f"Final scale after random crop and resize: {final_scale}")
+        # Insert scale range check
+        if final_scale < 0.01 or final_scale > 100.0 or np.isnan(final_scale) or np.isinf(final_scale):
+            print(f"⚠️ Rejected sample due to extreme scale: {final_scale}")
+            print(f"[DEBUG] scen_map_raw.shape = {scen_map_raw.shape}")
+            print(f"[DEBUG] observed_values (scaled and flipped):\n{observed_values}")
+            print(f"[DEBUG] track_resized:\n{track_resized}")
+            print(f"[DEBUG] scale_x = {scale_x}, scale_y = {scale_y}")
+            print(f"[DEBUG] final_map.shape = {final_map.shape}")
         return final_map, track_resized, final_scale
 
     def convert_to_track_coordinates(self, observed_values, H):
@@ -196,12 +247,13 @@ class AugmentedSimulationDataset(Simulation_Dataset):
         """
         Pads the scenario map to the target aspect ratio and resizes it,
         adjusting track coordinates accordingly.
+        desired_crop_size: (height, width)
         """
         # Convert coordinates
         observed_values = self.convert_to_track_coordinates(observed_values, scen_map_raw.shape[0])
 
         # Pad to aspect ratio
-        aspect = desired_crop_size[1] / desired_crop_size[0]
+        aspect = desired_crop_size[1] / desired_crop_size[0] # width/height
         padded_map, track_padded = self.pad_to_aspect_ratio(scen_map_raw, observed_values.copy(), aspect)
 
         # Resize
@@ -210,21 +262,42 @@ class AugmentedSimulationDataset(Simulation_Dataset):
         if scale_x != scale_y:
             print(f"Warning: Non-uniform scaling in pad_and_resize_with_track: scale_x={scale_x}, scale_y={scale_y}")
 
+        # Insert NaN/Inf and empty image checks before return
+        if np.isnan(track_resized).any() or np.isinf(track_resized).any():
+            raise ValueError("NaN or Inf detected in track after pad and resize!")
+        if final_map.size == 0:
+            raise ValueError("Empty image after pad and resize!")
+
         final_scale = self.scen_map_base_scale * (scale_x + scale_y) / 2
+        #print(f"Final scale after pad and resize: {final_scale}")
+        # Insert scale range check for pad_and_resize_with_track
+        if final_scale < 0.01 or final_scale > 100.0 or np.isnan(final_scale) or np.isinf(final_scale):
+            print(f"⚠️ Rejected padded sample due to extreme scale: {final_scale}")
+            #raise ValueError(f"Extreme final scale in pad and resize: {final_scale}")
         return final_map, track_resized, final_scale
 
+
+# ResizeWrapperDataset now allows external control of resize size
 class ResizeWrapperDataset:
-    def __init__(self, base_dataset, resize_options):
+    def __init__(self, base_dataset):
         self.base_dataset = base_dataset
-        self.resize_options = resize_options
-        self.current_resize_size = random.choice(self.resize_options)
 
     def __getitem__(self, index):
-        self.base_dataset.resize_to = self.current_resize_size
         return self.base_dataset[index]
 
     def __len__(self):
         return len(self.base_dataset)
+
+# Collate function that sets the resize size for the batch
+def make_resize_collate_fn(resize_options, dataset):
+    import random
+    from torch.utils.data.dataloader import default_collate
+
+    def collate_fn(batch):
+        dataset.base_dataset.resize_to = random.choice(resize_options)
+        return default_collate(batch)
+
+    return collate_fn
 
 def get_augmented_dataloader(
     data_length,
@@ -249,11 +322,43 @@ def get_augmented_dataloader(
             augmentation_mode=augmentation_mode,
             debug=debug
         )
-        wrapped_dataset = ResizeWrapperDataset(base_dataset, resize_options=resize_options)
-        return DataLoader(wrapped_dataset, batch_size=batch_size, shuffle=(mode == 'train'))
+        wrapped_dataset = ResizeWrapperDataset(base_dataset)
+        collate_fn = make_resize_collate_fn(resize_options, wrapped_dataset)
+        return DataLoader(wrapped_dataset, batch_size=batch_size, shuffle=(mode == 'train'), collate_fn=collate_fn)
+    if augmentation_mode is None:
+        print("⚠️ Warning: augmentation_mode is None, no augmentation will be applied and there will error. You may want to use get_nonaugmented_dataloader_with_scenario_batches instead for better performance.")
 
     train_loader = build_loader("train")
     valid_loader = build_loader("valid")
     test_loader = build_loader("test")
 
+    return train_loader, valid_loader, test_loader
+from dataset_simulation import ScenarioBatchDataLoader
+
+# Utility function to get a non-augmented dataloader using scenario batches
+def get_nonaugmented_dataloader_with_scenario_batches(
+    data_length,
+    seed,
+    scenarios=None,
+    batch_size=8,
+    load_scenario_map=True,
+    zero_based_position=True,
+    debug=False,
+):
+    def build_loader(mode):
+        dataset = AugmentedSimulationDataset(
+            data_length=data_length,
+            subset_split_seed=seed,
+            scenarios=scenarios,
+            mode=mode,
+            load_scenario_map=load_scenario_map,
+            zero_based_position=zero_based_position,
+            augmentation_mode=None,  # No augmentation applied
+            debug=debug,
+        )
+        return ScenarioBatchDataLoader(dataset, batch_size=batch_size, shuffle=(mode == 'train'))
+
+    train_loader = build_loader("train")
+    valid_loader = build_loader("valid")
+    test_loader = build_loader("test")
     return train_loader, valid_loader, test_loader

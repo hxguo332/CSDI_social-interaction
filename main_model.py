@@ -130,12 +130,35 @@ class CSDI_base(nn.Module):
 
         total_input = self.set_input_to_diffmodel(noisy_data, observed_data, cond_mask)
 
-        predicted = self.diffmodel(total_input, side_info, t)  # (B,K,L)
+        #predicted = self.diffmodel(total_input, side_info, t)  # (B,K,L)
+        try:
+            predicted = self.diffmodel(total_input, side_info, t)  # (B,K,L)
+        except Exception as e:
+            print("⚠️ Exception during self.diffmodel call:", e)
+            print("DEBUG: diffusion_step t =", t)
+            print("  t dtype:", t.dtype, "min:", t.min().item(), "max:", t.max().item())
+            print("  t NaN:", torch.isnan(t).any().item(), "Inf:", torch.isinf(t).any().item())
+
+            print("DEBUG: total_input stats")
+            print("  min:", total_input.min().item(), "max:", total_input.max().item(), "std:", total_input.std().item())
+            print("  NaN:", torch.isnan(total_input).any().item(), "Inf:", torch.isinf(total_input).any().item())
+
+            print("DEBUG: side_info stats")
+            print("  min:", side_info.min().item(), "max:", side_info.max().item(), "std:", side_info.std().item())
+            print("  NaN:", torch.isnan(side_info).any().item(), "Inf:", torch.isinf(side_info).any().item())
+            raise  # re-raise the exception
 
         target_mask = observed_mask - cond_mask
         residual = (noise - predicted) * target_mask
         num_eval = target_mask.sum()
-        loss = (residual ** 2).sum() / (num_eval if num_eval > 0 else 1)
+        # Insert runtime checks for NaN, Inf, and zero-sized evaluation mask:
+        if torch.isnan(predicted).any() or torch.isinf(predicted).any():
+            raise ValueError("predicted contains NaN or Inf")
+        if torch.isnan(residual).any() or torch.isinf(residual).any():
+            raise ValueError("residual contains NaN or Inf")
+        if num_eval == 0:
+            raise ValueError("No valid target points to evaluate (num_eval=0). Check target_mask logic.")
+        loss = (residual ** 2).sum() / num_eval
         return loss
 
     def set_input_to_diffmodel(self, noisy_data, observed_data, cond_mask):
@@ -444,10 +467,11 @@ class CSDI_Forecasting(CSDI_base):
         return samples, observed_data, target_mask, observed_mask, observed_tp
 
 class CSDI_SimulationScenmap(CSDI_base):
-    def __init__(self, config, device, target_dim=2):
+    def __init__(self, config, device, target_dim=2, scale_embed_dim=4):
         super(CSDI_base, self).__init__()
         self.device = device
         self.target_dim = target_dim
+        self.scale_embed_dim = scale_embed_dim
 
         self.emb_time_dim = config["model"]["timeemb"]
         self.emb_feature_dim = config["model"]["featureemb"]
@@ -455,10 +479,17 @@ class CSDI_SimulationScenmap(CSDI_base):
         self.target_strategy = config["model"]["target_strategy"]
         # init the scenario map embedding layer
         self.emb_scenmap_dim = config["model"]["scenmapemb"]
+
+        # use MLP to embed the scale
         self.scale_dim = 2 # scale of the scenario map, x direction and y direction
+        self.scale_mlp = nn.Sequential(
+            nn.Linear(self.scale_dim, 16),
+            nn.ReLU(),
+            nn.Linear(16, self.scale_embed_dim),
+        )
 
         # TODO: add the shape of the scenario map
-        self.emb_total_dim = self.emb_time_dim + self.emb_feature_dim + self.emb_scenmap_dim + self.scale_dim# we can add the shape later
+        self.emb_total_dim = self.emb_time_dim + self.emb_feature_dim + self.emb_scenmap_dim + self.scale_embed_dim # we can add the shape later
         if self.is_unconditional == False:
             self.emb_total_dim += 1  # for conditional mask
 
@@ -517,10 +548,11 @@ class CSDI_SimulationScenmap(CSDI_base):
 
         side_info = torch.cat([side_info, scenmap_embed], dim=1)
 
-        # scenmap_scales shape: (B, 2), we need to expand it to (B, 2, K, L)
-        extended_scenmap_scales = scenmap_scales.unsqueeze(-1).unsqueeze(-1).expand(-1, 2, K, L)
-        # add the scenario map scales to the side info
-        side_info = torch.cat([side_info, extended_scenmap_scales], dim=1)
+        # scenmap_scales shape: (B, 2), embed with MLP and expand to (B, scale_embed_dim, K, L)
+        scale_embed = self.scale_mlp(scenmap_scales) # (B, scale_embed_dim)
+        scale_embed = scale_embed.unsqueeze(-1).unsqueeze(-1).expand(-1, self.scale_embed_dim, K, L)
+        # add the scenario map scales embedding to the side info
+        side_info = torch.cat([side_info, scale_embed], dim=1)
 
         return side_info
 
@@ -566,7 +598,7 @@ class CSDI_SimulationScenmap(CSDI_base):
             cond_mask = gt_mask
             target_mask = observed_mask - cond_mask
 
-            side_info = self.get_side_info(observed_tp, cond_mask, scenmap)
+            side_info = self.get_side_info(observed_tp, cond_mask, scenmap, scenmap_scales)
 
             samples = self.impute(observed_data, cond_mask, side_info, n_samples)
 

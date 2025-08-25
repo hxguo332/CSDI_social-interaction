@@ -51,7 +51,8 @@ if __name__ == "__main__":
     print(json.dumps(config, indent=4))
 
     # Call the function to save the config and get the folder name
-    foldername = save_config(config, args)
+    if args.modelfolder == "":
+        foldername = save_config(config, args)
 
     train_loader, valid_loader, test_loader = get_augmented_dataloader(
         scenarios=config["dataset"]["scenarios"],
