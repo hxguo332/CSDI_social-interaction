@@ -16,6 +16,8 @@ def train(
     optimizer = Adam(model.parameters(), lr=config["lr"], weight_decay=1e-6)
     if foldername != "":
         output_path = foldername + "/model.pth"
+    else:
+        output_path = None
 
     p1 = int(0.75 * config["epochs"])
     p2 = int(0.9 * config["epochs"])
@@ -30,11 +32,16 @@ def train(
         with tqdm(train_loader, mininterval=5.0, maxinterval=50.0) as it:
             for batch_no, train_batch in enumerate(it, start=1):
                 optimizer.zero_grad()
-
                 loss = model(train_batch)
+
+                if torch.isnan(loss) or torch.isinf(loss):
+                    print(f"⚠️ Skipping batch {batch_no} due to NaN/Inf loss.")
+                    continue
+
                 loss.backward()
                 avg_loss += loss.item()
                 optimizer.step()
+
                 it.set_postfix(
                     ordered_dict={
                         "avg_epoch_loss": avg_loss / batch_no,
@@ -48,15 +55,17 @@ def train(
             lr_scheduler.step()
         if valid_loader is not None and (epoch_no + 1) % valid_epoch_interval == 0:
             model.eval()
-            avg_loss_valid = 0
+            avg_loss_valid = 1000000
+            loss_sum = 0
             with torch.no_grad():
                 with tqdm(valid_loader, mininterval=5.0, maxinterval=50.0) as it:
                     for batch_no, valid_batch in enumerate(it, start=1):
                         loss = model(valid_batch, is_train=0)
-                        avg_loss_valid += loss.item()
+                        loss_sum += loss.item()
+                        avg_loss_valid = loss_sum / batch_no
                         it.set_postfix(
                             ordered_dict={
-                                "valid_avg_epoch_loss": avg_loss_valid / batch_no,
+                                "valid_avg_epoch_loss": avg_loss_valid,
                                 "epoch": epoch_no,
                             },
                             refresh=False,
@@ -65,19 +74,19 @@ def train(
                 best_valid_loss = avg_loss_valid
                 print(
                     "\n best loss is updated to ",
-                    avg_loss_valid / batch_no,
+                    avg_loss_valid,
                     "at",
                     epoch_no,
                 )
 
-    if foldername != "":
+    if output_path is not None:
         torch.save(model.state_dict(), output_path)
 
 
 def quantile_loss(target, forecast, q: float, eval_points) -> float:
     return 2 * torch.sum(
         torch.abs((forecast - target) * eval_points * ((target <= forecast) * 1.0 - q))
-    )
+    ).item()
 
 
 def calc_denominator(target, eval_points):
@@ -99,7 +108,7 @@ def calc_quantile_CRPS(target, forecast, eval_points, mean_scaler, scaler):
         q_pred = torch.cat(q_pred, 0)
         q_loss = quantile_loss(target, q_pred, quantiles[i], eval_points)
         CRPS += q_loss / denom
-    return CRPS.item() / len(quantiles)
+    return CRPS / len(quantiles)
 
 def calc_quantile_CRPS_sum(target, forecast, eval_points, mean_scaler, scaler):
 
@@ -115,7 +124,7 @@ def calc_quantile_CRPS_sum(target, forecast, eval_points, mean_scaler, scaler):
         q_pred = torch.quantile(forecast.sum(-1),quantiles[i],dim=1)
         q_loss = quantile_loss(target, q_pred, quantiles[i], eval_points)
         CRPS += q_loss / denom
-    return CRPS.item() / len(quantiles)
+    return CRPS / len(quantiles)
 
 def process_batch_data(output, return_scen_map):
     """
@@ -128,6 +137,8 @@ def process_batch_data(output, return_scen_map):
     Returns:
         Processed tensors for samples, target, eval_points, observed_points, and observed_time.
     """
+    scen_map = None
+    scen_map_scale = None
     if return_scen_map:
         samples, c_target, eval_points, observed_points, observed_time, scen_map, scen_map_scale = output
     else:
@@ -139,11 +150,7 @@ def process_batch_data(output, return_scen_map):
     eval_points = eval_points.permute(0, 2, 1)
     observed_points = observed_points.permute(0, 2, 1)
 
-    if return_scen_map:
-        #scen_map = scen_map.permute(0, 2, 1)
-        return samples, c_target, eval_points, observed_points, observed_time, scen_map, scen_map_scale
-    else:
-        return samples, c_target, eval_points, observed_points, observed_time
+    return samples, c_target, eval_points, observed_points, observed_time, scen_map, scen_map_scale
 
 
 def compute_batch_metrics(samples_median, c_target, eval_points, scaler):
@@ -349,6 +356,7 @@ def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldernam
         model.eval()
         mse_total, mae_total, evalpoints_total = 0, 0, 0
 
+        collision_evaluator = None
         if return_scen_map:
             collision_evaluator = CollisionEvaluator()
 
@@ -367,12 +375,11 @@ def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldernam
                     # Evaluate the model on the current batch
                     output = model.evaluate(test_batch, nsample)
                     # Process batch data
-                    samples, c_target, eval_points, observed_points, observed_time = process_batch_data(output, return_scen_map)
-
+                    samples, c_target, eval_points, observed_points, observed_time, scen_map, scen_maps_scale = process_batch_data(output, return_scen_map)
                 # Compute the median of the generated samples
                 samples_median = samples.median(dim=1).values
                 
-                if return_scen_map:
+                if collision_evaluator is not None:
                     collision_evaluator.update(samples_median, scen_map, eval_points, scen_maps_scale)
 
                 # Append results to the respective lists
@@ -414,7 +421,7 @@ def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldernam
         # Save evaluation metrics
         RMSE = np.sqrt(mse_total / evalpoints_total)
         MAE = mae_total / evalpoints_total
-        if return_scen_map:
+        if collision_evaluator is not None:
             collision_rate, invalid_rate = collision_evaluator.compute_metrics()
             print("Collision Rate:", collision_rate)
             print("Invalid Rate:", invalid_rate)

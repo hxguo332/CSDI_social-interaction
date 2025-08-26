@@ -258,6 +258,9 @@ class CSDI_base(nn.Module):
                 target_mask[i, ..., 0 : cut_length[i].item()] = 0
         return samples, observed_data, target_mask, observed_mask, observed_tp
 
+    def process_data(self, batch):
+        raise NotImplementedError("This method should be overridden by subclasses.")
+
 
 class CSDI_PM25(CSDI_base):
     def __init__(self, config, device, target_dim=36):
