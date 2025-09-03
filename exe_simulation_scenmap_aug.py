@@ -38,6 +38,7 @@ if __name__ == "__main__":
     parser.add_argument("--modelfolder", type=str, default="")
     parser.add_argument("--nsample", type=int, default=100)
     parser.add_argument("--data_length", type=int, default=100)
+    parser.add_argument("--sample_mode", type=str, default="normalized", choices=["normalized", "unnormalized"])
 
     args = parser.parse_args()
     print(args)
@@ -53,15 +54,48 @@ if __name__ == "__main__":
     # Call the function to save the config and get the folder name
     if args.modelfolder == "":
         foldername = save_config(config, args)
+    else:
+        foldername = args.modelfolder
 
-    train_loader, valid_loader, test_loader = get_augmented_dataloader(
+    if args.modelfolder == "":
+        train_loader, batch_sampler_train = get_augmented_dataloader(
+            scenarios=config["dataset"]["scenarios"],
+            data_length=args.data_length,
+            seed=args.seed,
+            batch_size=config["train"]["batch_size"],
+            zero_based_position=True,
+            load_scenario_map=True,
+            part="train",
+            augmentation_mode=config["train"]["augmentation_mode"],
+            resize_options=config["train"]["resize_options"],
+            debug=False,
+            #missing_ratio=config["model"]["test_missing_ratio"],
+        )
+
+        valid_loader, batch_sampler_valid = get_augmented_dataloader(
+            scenarios=config["dataset"]["scenarios"],
+            data_length=args.data_length,
+            seed=args.seed,
+            batch_size=config["valid"]["batch_size"],
+            zero_based_position=True,
+            load_scenario_map=True,
+            part="valid",
+            augmentation_mode=config["valid"]["augmentation_mode"],
+            resize_options=config["valid"]["resize_options"],
+            debug=False,
+        )
+
+    test_loader, batch_sampler_test = get_augmented_dataloader(
         scenarios=config["dataset"]["scenarios"],
         data_length=args.data_length,
         seed=args.seed,
-        batch_size=config["train"]["batch_size"],
+        batch_size=config["test"]["batch_size"],
         zero_based_position=True,
         load_scenario_map=True,
-        #missing_ratio=config["model"]["test_missing_ratio"],
+        part="test",
+        augmentation_mode=config["test"]["augmentation_mode"],
+        resize_options=config["test"]["resize_options"],
+        debug=False,
     )
 
     model = CSDI_SimulationScenmap(config, args.device).to(args.device)
@@ -75,6 +109,7 @@ if __name__ == "__main__":
             foldername=foldername,
         )
     else:
-        model.load_state_dict(torch.load("./save/" + args.modelfolder + "/model.pth"))
+        model.load_state_dict(torch.load(foldername + "/model.pth"))
 
-    evaluate(model, test_loader, nsample=args.nsample, scaler=1, foldername=foldername)
+    sample_mode = args.sample_mode
+    evaluate(model, test_loader, nsample=args.nsample, scaler=1, foldername=foldername, mode=sample_mode)

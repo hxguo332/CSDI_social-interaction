@@ -12,6 +12,8 @@ def train(
     valid_loader=None,
     valid_epoch_interval=20,
     foldername="",
+    batch_sampler_train=None,
+    batch_sampler_valid=None,
 ):
     optimizer = Adam(model.parameters(), lr=config["lr"], weight_decay=1e-6)
     if foldername != "":
@@ -29,6 +31,8 @@ def train(
     for epoch_no in range(config["epochs"]):
         avg_loss = 0
         model.train()
+        if batch_sampler_train is not None:
+            batch_sampler_train.set_epoch(epoch_no)
         with tqdm(train_loader, mininterval=5.0, maxinterval=50.0) as it:
             for batch_no, train_batch in enumerate(it, start=1):
                 optimizer.zero_grad()
@@ -57,6 +61,8 @@ def train(
             model.eval()
             avg_loss_valid = 1000000
             loss_sum = 0
+            if batch_sampler_valid is not None:
+                batch_sampler_valid.set_epoch(epoch_no)
             with torch.no_grad():
                 with tqdm(valid_loader, mininterval=5.0, maxinterval=50.0) as it:
                     for batch_no, valid_batch in enumerate(it, start=1):
@@ -177,7 +183,7 @@ def compute_batch_metrics(samples_median, c_target, eval_points, scaler):
     return mse_current.sum().item(), mae_current.sum().item()
 
 
-def save_generated_outputs(foldername, nsample, all_target, all_evalpoint, all_observed_point, all_observed_time, all_generated_samples, scaler, mean_scaler):
+def save_generated_outputs(foldername, nsample, all_target, all_evalpoint, all_observed_point, all_observed_time, all_generated_samples, scaler, mean_scaler, mode=None):
     """
     Save generated outputs to a pickle file.
 
@@ -188,7 +194,11 @@ def save_generated_outputs(foldername, nsample, all_target, all_evalpoint, all_o
         scaler: Scaling factor for the target values.
         mean_scaler: Mean scaler for the target values.
     """
-    with open(foldername + f"/generated_outputs_nsample{nsample}.pk", "wb") as f:
+    if mode is not None:
+        file_path = foldername + f"/generated_outputs_nsample{nsample}_{mode}.pk"
+    else:
+        file_path = foldername + f"/generated_outputs_nsample{nsample}.pk"
+    with open(file_path, "wb") as f:
         pickle.dump(
             [
                 all_generated_samples,
@@ -320,7 +330,7 @@ class CollisionEvaluator:
         return collision_rate, invalid_rate
 
 
-def save_evaluation_metrics(foldername, nsample, metrics_dict):
+def save_evaluation_metrics(foldername, nsample, metrics_dict, mode=None):
     """
     Save evaluation metrics to a CSV file.
 
@@ -328,15 +338,19 @@ def save_evaluation_metrics(foldername, nsample, metrics_dict):
         foldername: Directory to save the file.
         nsample: Number of samples generated.
         metrics_dict: Dictionary containing evaluation metrics (RMSE, MAE, CRPS, etc.).
+        mode: Sampling mode, either "normalized" or "unnormalized" (optional).
     """
-    result_path = foldername + f"/result_nsample{nsample}.csv"
+    if mode is not None:
+        result_path = foldername + f"/result_nsample{nsample}_{mode}.csv"
+    else:
+        result_path = foldername + f"/result_nsample{nsample}.csv"
     with open(result_path, "w") as f:
         f.write("Metric,Value\n")
         for key, value in metrics_dict.items():
             f.write(f"{key},{value}\n")
 
 
-def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldername="", return_scen_map=False):
+def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldername="", return_scen_map=False, mode="unnormalized"):
     """
     Evaluate the model on the test dataset and compute various metrics.
 
@@ -348,6 +362,7 @@ def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldernam
         mean_scaler: Mean scaler for the target values.
         foldername: Directory to save evaluation results and generated outputs.
         return_scen_map: Whether scenario map is returned in each batch in dataloader (optional).
+        mode: Sampling mode, either "normalized" or "unnormalized".
 
     Returns:
         None. Saves evaluation metrics and generated outputs to files.
@@ -368,12 +383,18 @@ def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldernam
 
                 if return_scen_map:
                     # Evaluate the model on the current batch
-                    output = model.evaluate(test_batch, nsample, return_scenmap=True)
+                    if mode is not None:
+                        output = model.evaluate(test_batch, nsample, return_scenmap=True, mode=mode)
+                    else:
+                        output = model.evaluate(test_batch, nsample, return_scenmap=True)
                     # Process batch data
                     samples, c_target, eval_points, observed_points, observed_time, scen_map, scen_maps_scale = process_batch_data(output, return_scen_map)
                 else:
                     # Evaluate the model on the current batch
-                    output = model.evaluate(test_batch, nsample)
+                    if mode is not None:
+                        output = model.evaluate(test_batch, nsample, mode=mode)
+                    else:
+                        output = model.evaluate(test_batch, nsample)
                     # Process batch data
                     samples, c_target, eval_points, observed_points, observed_time, scen_map, scen_maps_scale = process_batch_data(output, return_scen_map)
                 # Compute the median of the generated samples
@@ -410,7 +431,7 @@ def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldernam
         # Save generated outputs
         save_generated_outputs(foldername, nsample, torch.cat(all_target, dim=0), torch.cat(all_evalpoint, dim=0),
                                torch.cat(all_observed_point, dim=0), torch.cat(all_observed_time, dim=0),
-                               torch.cat(all_generated_samples, dim=0), scaler, mean_scaler)
+                               torch.cat(all_generated_samples, dim=0), scaler, mean_scaler, mode)
 
         # Compute CRPS metrics
         CRPS, CRPS_sum = compute_crps_metrics(torch.cat(all_target, dim=0), torch.cat(all_generated_samples, dim=0),
@@ -440,7 +461,7 @@ def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldernam
                 "CRPS": CRPS,
                 "CRPS_sum": CRPS_sum,
             }
-        save_evaluation_metrics(foldername, nsample, metrics_dict)
+        save_evaluation_metrics(foldername, nsample, metrics_dict, mode)
 
         # Print evaluation metrics
         print("RMSE:", RMSE)

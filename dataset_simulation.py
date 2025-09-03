@@ -107,8 +107,13 @@ class Simulation_Dataset(Dataset):
 
         time_points = np.array(data['time'])
         time_points = np.nan_to_num(time_points)
-        person_ids = np.array(data['personID'])
-        person_ids = np.nan_to_num(person_ids)
+        person_ids = data['personID'].to_numpy()
+        if np.issubdtype(person_ids.dtype, np.floating) and np.isnan(person_ids).any():
+            person_ids = np.where(np.isnan(person_ids), -1, person_ids)
+
+        person_ids = person_ids.astype(np.int64, copy=False)
+        #person_ids = np.array(data['personID'])
+        #person_ids = np.nan_to_num(person_ids)
         return observed_values, observed_masks, gt_masks, time_points, person_ids
 
     def split_data_in_subsets(self, data):

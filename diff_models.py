@@ -158,20 +158,45 @@ class ResidualBlock(nn.Module):
         x = x.reshape(B, channel, K * L)
 
         diffusion_emb = self.diffusion_projection(diffusion_emb).unsqueeze(-1)  # (B,channel,1)
+        # Debug check after diffusion_emb projection
+        if torch.isnan(diffusion_emb).any() or torch.isinf(diffusion_emb).any():
+            raise ValueError("NaN or Inf in diffusion_emb")
         y = x + diffusion_emb
 
         y = self.forward_time(y, base_shape)
+        # Debug check after time_layer
+        if torch.isnan(y).any() or torch.isinf(y).any():
+            raise ValueError("NaN or Inf after time_layer")
+
         y = self.forward_feature(y, base_shape)  # (B,channel,K*L)
+        # Debug check after feature_layer
+        if torch.isnan(y).any() or torch.isinf(y).any():
+            raise ValueError("NaN or Inf after feature_layer")
+
         y = self.mid_projection(y)  # (B,2*channel,K*L)
+        # Debug check after mid_projection
+        if y.abs().max() > 1e4:
+            print("⚠️ mid_projection output too large:", y.abs().max().item())
 
         _, cond_dim, _, _ = cond_info.shape
         cond_info = cond_info.reshape(B, cond_dim, K * L)
         cond_info = self.cond_projection(cond_info)  # (B,2*channel,K*L)
+        # Debug check after cond_projection
+        if cond_info.abs().max() > 1e4:
+            print("⚠️ cond_projection output too large:", cond_info.abs().max().item())
+
         y = y + cond_info
 
         gate, filter = torch.chunk(y, 2, dim=1)
+        # Debug check before gate/filter activation
+        if torch.isnan(gate).any() or torch.isnan(filter).any():
+            raise ValueError("NaN in gate or filter before activation")
         y = torch.sigmoid(gate) * torch.tanh(filter)  # (B,channel,K*L)
+
         y = self.output_projection(y)
+        # Debug check after output_projection
+        if torch.isnan(y).any() or torch.isinf(y).any():
+            raise ValueError("NaN or Inf in output_projection")
 
         residual, skip = torch.chunk(y, 2, dim=1)
         x = x.reshape(base_shape)

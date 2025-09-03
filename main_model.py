@@ -585,9 +585,9 @@ class CSDI_SimulationScenmap(CSDI_base):
 
         return loss_func(observed_data, cond_mask, observed_mask, side_info, is_train)
 
-    def evaluate(self, batch, n_samples, return_scenmap=False):
+    def evaluate(self, batch, n_samples, return_scenmap=False, mode="normalized"):
         (
-            observed_data,
+            observed_data, # groundtruth data
             observed_mask,
             observed_tp,
             gt_mask,
@@ -607,6 +607,23 @@ class CSDI_SimulationScenmap(CSDI_base):
 
             for i in range(len(cut_length)):  # to avoid double evaluation
                 target_mask[i, ..., 0 : cut_length[i].item()] = 0
+
+        if mode == "unnormalized":
+        # scenmap: (B, C, H, W), samples: (B, nsample, 2, L), observed_data: (B, 2, L)
+            B, _, H, W = scenmap.shape
+            scale_wh = torch.tensor([W, H], device=samples.device, dtype=samples.dtype)
+
+            # Rescale samples
+            samples = samples * scale_wh.view(1, 1, 2, 1)       # (B, nsample, 2, L)
+
+            # Rescale observed/target too if needed
+            observed_data = observed_data * scale_wh.view(1, 2, 1)  # (B, 2, L)
+
+            # Un-normalize generated samples and observed data
+            # scenmap_scales: (B, 2)
+            samples = samples * scenmap_scales.unsqueeze(1).unsqueeze(3)  # (B, nsample, K, L)
+            observed_data = observed_data * scenmap_scales.unsqueeze(2)  # (B, K, L)
+
         if return_scenmap:
             return samples, observed_data, target_mask, observed_mask, observed_tp, scenmap, scenmap_scales
         else:

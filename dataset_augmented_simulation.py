@@ -1,10 +1,16 @@
 import matplotlib.pyplot as plt
 import numpy as np
+import math
+import torch
+from torch.utils.data import Sampler
 
 import random
 from dataset_simulation import Simulation_Dataset
+from dataset_simulation import ScenarioBatchDataLoader
 import cv2
 import numpy as np
+from dataclasses import dataclass
+from typing import Tuple
 
 def resize_map(map_img, target_shape):
     # cv2 expects (width, height)
@@ -17,12 +23,19 @@ class AugmentedSimulationDataset(Simulation_Dataset):
     def __init__(self, *args, augmentation_mode='crop_and_resize', resize_to=(128, 128), debug=False, **kwargs):
         super().__init__(*args, **kwargs)
         self.augmentation_mode = augmentation_mode
-        self.resize_to = resize_to # (height, width), this is not used if augmentation_mode is None
+        self.default_resize_to = resize_to # (height, width), this is not used if augmentation_mode is None
         self.debug = debug
         if not self.load_scenario_map:
             raise ValueError("AugmentedSimulationDataset requires load_scenario_map=True")
 
-    def __getitem__(self, index):
+    def __getitem__(self, key):
+        if isinstance(key, tuple):
+            index, batch_params = key
+            resize_to = batch_params.resize_to
+        else:
+            index, batch_params = key, None
+            resize_to = self.default_resize_to
+
         index, scenario = self.get_index(index)
         track = self.data[scenario][index]
 
@@ -30,7 +43,7 @@ class AugmentedSimulationDataset(Simulation_Dataset):
             track, scenario, missing_ratio=self.missing_ratio, missing_strategy=self.missing_strategy)
 
         scen_map_raw = self.scen_map[scenario]
-        desired_crop_size = self.resize_to
+        desired_crop_size = resize_to
 
         # Draw the track on the scenario map for debugging
         if self.debug:
@@ -51,13 +64,13 @@ class AugmentedSimulationDataset(Simulation_Dataset):
             scen_map_processed, adjusted_values, rescale = self.maybe_augment_sample(
                 scen_map_raw, observed_values, observed_masks, desired_crop_size
             )
-            resize_shape = self.resize_to
+            # Use actual shape of the processed scenario map
+            resize_shape = resize_to
         elif self.augmentation_mode == 'pad_and_resize':
             final_map, adjusted_values, scale = self.pad_and_resize_with_track(scen_map_raw, observed_values, desired_crop_size)
             scen_map_processed = final_map
             rescale = scale
-            resize_shape = self.resize_to
-
+            resize_shape = resize_to
             #return final_map, adjusted_values, scale # 1.0 scale means no scaling applied
         elif self.augmentation_mode == None:
             rescale = self.scen_map_base_scale
@@ -68,6 +81,11 @@ class AugmentedSimulationDataset(Simulation_Dataset):
         
         # Try to make the rescale a number between 0 and 1
         rescale = rescale / 100 # The scale is the real scale applied to the scenario map regarding the original scenario map size. (The original scenario map size should be based on the track coordinates)
+
+        # Normalize adjusted track coordinates to [0, 1] based on final scenario map shape
+        map_height, map_width = scen_map_processed.shape[:2]
+        map_size = np.array([map_width, map_height], dtype=np.float32)
+        adjusted_values = adjusted_values / map_size  # shape (T, 2)
 
         s = {
             'observed_data': adjusted_values,
@@ -200,7 +218,7 @@ class AugmentedSimulationDataset(Simulation_Dataset):
         padded_map, track_padded = self.pad_to_aspect_ratio(cropped_map, track_adj, aspect)
         final_map, track_resized, (scale_x, scale_y) = self.resize_map_and_track(padded_map, track_padded, desired_crop_size)
 
-        if scale_x != scale_y:
+        if abs(scale_x - scale_y) > 1e-3:
             print(f"Warning: Non-uniform scaling detected: scale_x={scale_x}, scale_y={scale_y}")
 
         # Insert NaN/Inf and empty image checks before return
@@ -277,40 +295,20 @@ class AugmentedSimulationDataset(Simulation_Dataset):
         return final_map, track_resized, final_scale
 
 
-# ResizeWrapperDataset now allows external control of resize size
-class ResizeWrapperDataset:
-    def __init__(self, base_dataset):
-        self.base_dataset = base_dataset
-
-    def __getitem__(self, index):
-        return self.base_dataset[index]
-
-    def __len__(self):
-        return len(self.base_dataset)
-
-# Collate function that sets the resize size for the batch
-def make_resize_collate_fn(resize_options, dataset):
-    import random
-    from torch.utils.data.dataloader import default_collate
-
-    def collate_fn(batch):
-        dataset.base_dataset.resize_to = random.choice(resize_options)
-        return default_collate(batch)
-
-    return collate_fn
-
-def get_augmented_dataloader(
+def get_augmented_dataloader_old(
     data_length,
     seed,
     scenarios=None,
     batch_size=8,
     load_scenario_map=True,
     zero_based_position=True,
-    resize_options=[(384, 384), (512, 512), (768, 768)],
+    resize_options=[(384, 384), (512, 512), (768, 768)], # List of (height, width) tuples
     augmentation_mode='crop_and_resize',
+    part="train",
     debug=False
 ):
     from torch.utils.data import DataLoader
+    assert part in ["train", "valid", "test"], "part must be 'train',  'valid' or 'test'"
     def build_loader(mode):
         base_dataset = AugmentedSimulationDataset(
             data_length=data_length,
@@ -322,18 +320,67 @@ def get_augmented_dataloader(
             augmentation_mode=augmentation_mode,
             debug=debug
         )
-        wrapped_dataset = ResizeWrapperDataset(base_dataset)
-        collate_fn = make_resize_collate_fn(resize_options, wrapped_dataset)
-        return DataLoader(wrapped_dataset, batch_size=batch_size, shuffle=(mode == 'train'), collate_fn=collate_fn)
+        wrapped_dataset = ResizeWrapperDataset(base_dataset, resize_options, batch_size)
+        return DataLoader(wrapped_dataset, batch_size=batch_size, shuffle=(mode == 'train'))
     if augmentation_mode is None:
         print("⚠️ Warning: augmentation_mode is None, no augmentation will be applied and there will error. You may want to use get_nonaugmented_dataloader_with_scenario_batches instead for better performance.")
+    
+    return build_loader(part)
 
-    train_loader = build_loader("train")
-    valid_loader = build_loader("valid")
-    test_loader = build_loader("test")
+from torch.utils.data import DataLoader, RandomSampler, DistributedSampler
 
-    return train_loader, valid_loader, test_loader
-from dataset_simulation import ScenarioBatchDataLoader
+def get_augmented_dataloader(
+    data_length,
+    seed,
+    scenarios=None,
+    batch_size=8,
+    load_scenario_map=True,
+    zero_based_position=True,
+    resize_options=((384,384), (512,512), (768,768)),
+    augmentation_mode='crop_and_resize',
+    part="train",
+    debug=False,
+    distributed=False,
+    drop_last=True,
+    num_workers=8,
+):
+    assert part in ["train", "valid", "test"]
+    base_dataset = AugmentedSimulationDataset(
+        data_length=data_length,
+        subset_split_seed=seed,
+        scenarios=scenarios,
+        mode=part,
+        load_scenario_map=load_scenario_map,
+        zero_based_position=zero_based_position,
+        augmentation_mode=augmentation_mode,
+        resize_to=resize_options[0],  # 只是默认值；真正按批的来自 sampler
+        debug=debug,
+    )
+
+    if distributed:
+        base_sampler = DistributedSampler(base_dataset, shuffle=(part=="train"), seed=seed, drop_last=drop_last)
+    else:
+        base_sampler = RandomSampler(base_dataset) if part=="train" else torch.utils.data.SequentialSampler(base_dataset)
+
+    batch_sampler = BatchParamSampler(
+        base_sampler=base_sampler,
+        batch_size=batch_size,
+        resize_options=resize_options,
+        drop_last=drop_last,
+        seed=seed,
+    )
+
+    loader = DataLoader(
+        base_dataset,
+        batch_sampler=batch_sampler,   # ⚠️ 不要再传 batch_size/shuffle
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=(num_workers>0),
+        collate_fn=None,               # 默认就好（或写个轻量的，用于 pad 轨迹）
+        prefetch_factor=4 if num_workers>0 else None,
+    )
+    return loader, batch_sampler  # 训练循环里每个 epoch 记得 set_epoch
+
 
 # Utility function to get a non-augmented dataloader using scenario batches
 def get_nonaugmented_dataloader_with_scenario_batches(
@@ -344,7 +391,9 @@ def get_nonaugmented_dataloader_with_scenario_batches(
     load_scenario_map=True,
     zero_based_position=True,
     debug=False,
+    part="train",
 ):
+    assert part in ["train", "valid", "test"], "part must be 'train',  'valid' or 'test'"
     def build_loader(mode):
         dataset = AugmentedSimulationDataset(
             data_length=data_length,
@@ -357,8 +406,68 @@ def get_nonaugmented_dataloader_with_scenario_batches(
             debug=debug,
         )
         return ScenarioBatchDataLoader(dataset, batch_size=batch_size, shuffle=(mode == 'train'))
+    return build_loader(part)
 
-    train_loader = build_loader("train")
-    valid_loader = build_loader("valid")
-    test_loader = build_loader("test")
-    return train_loader, valid_loader, test_loader
+
+@dataclass(frozen=True)
+class BatchParams:
+    resize_to: Tuple[int, int]     # (H, W)
+
+class BatchParamSampler(Sampler):
+    def __init__(self, base_sampler: Sampler, batch_size: int, resize_options, drop_last=False, seed=0):
+        self.base_sampler = base_sampler
+        self.batch_size = batch_size
+        self.resize_options = tuple(resize_options)
+        self.drop_last = drop_last
+        self.seed = seed
+        self.epoch = 0
+
+    def set_epoch(self, epoch: int):
+        self.epoch = epoch
+        if hasattr(self.base_sampler, "set_epoch"):
+            self.base_sampler.set_epoch(epoch)
+
+    def __iter__(self):
+        rng = random.Random(self.seed + self.epoch)
+        batch = []
+        for idx in self.base_sampler:
+            batch.append(idx)
+            if len(batch) == self.batch_size:
+                params = BatchParams(resize_to=rng.choice(self.resize_options))
+                yield [(i, params) for i in batch]
+                batch = []
+        if len(batch) and not self.drop_last:
+            params = BatchParams(resize_to=rng.choice(self.resize_options))
+            yield [(i, params) for i in batch]
+
+    def __len__(self):
+        n = len(self.base_sampler)
+        return (n // self.batch_size) if self.drop_last else math.ceil(n / self.batch_size)
+
+from torch.utils.data._utils.collate import default_collate
+import numpy as np
+import torch
+
+def debug_collate(batch):
+    print("---- DEBUG COLLATE ----")
+    for k in batch[0].keys():
+        types = []
+        shapes = []
+        dtypes = []
+        for i, b in enumerate(batch):
+            v = b[k]
+            if isinstance(v, np.ndarray):
+                types.append("np")
+                shapes.append(v.shape)
+                dtypes.append(v.dtype)
+            elif torch.is_tensor(v):
+                types.append("torch")
+                shapes.append(tuple(v.shape))
+                dtypes.append(v.dtype)
+            else:
+                types.append(type(v).__name__)
+                shapes.append(getattr(v, "shape", None))
+                dtypes.append(getattr(v, "dtype", None))
+        print(f"{k:>16s} | types={set(types)} dtypes={set(map(str,dtypes))} shapes={set(map(str,shapes))}")
+    print("-----------------------")
+    return default_collate(batch)
