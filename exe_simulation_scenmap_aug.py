@@ -107,6 +107,8 @@ if __name__ == "__main__":
             train_loader,
             valid_loader=valid_loader,
             foldername=foldername,
+            batch_sampler_train=batch_sampler_train,
+            batch_sampler_valid=batch_sampler_valid,
         )
     else:
         model.load_state_dict(torch.load(foldername + "/model.pth"))

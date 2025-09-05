@@ -1,36 +1,30 @@
 
-#type: args
+# Train on augmented data; validate and test on non-augmented scenario-batch loader
 
 train:
   epochs: 200
-  batch_size: 16 
+  batch_size: 16
   lr: 1.0e-3
   itr_per_epoch: 1.0e+8
+  dataloader: augmented
   augmentation_mode: "crop_and_resize"
-  # Options for resize: [height, width]
   resize_options:
-  - [384, 384]
-  - [512, 512]
-  - [768, 768]
+    - [384, 384]
+    - [512, 512]
+    - [768, 768]
 
 valid:
-  batch_size: 16 
-  augmentation_mode: "pad_and_resize"
-  # Options for resize: [height, width]
-  resize_options:
-  - [512, 512]
+  batch_size: 16
+  dataloader: nonaugmented_scenario_batch
 
 test:
   batch_size: 16
-  augmentation_mode: "pad_and_resize"
-  # Options for resize: [height, width]
-  resize_options:
-  - [512, 512]
-
+  dataloader: nonaugmented_scenario_batch
+  return_scen_map: true  # compute collision/invalid metrics in evaluation
 
 diffusion:
-  layers: 4 
-  channels: 64 
+  layers: 4
+  channels: 64
   nheads: 8
   diffusion_embedding_dim: 128
   beta_start: 0.0001
@@ -48,3 +42,4 @@ model:
 
 dataset:
   scenarios: null
+

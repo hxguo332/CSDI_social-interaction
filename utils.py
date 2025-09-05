@@ -251,7 +251,7 @@ class CollisionEvaluator:
 
         self.scenmap_scale = scenmap_scale
 
-    def update(self, samples_batch, scen_maps_batch, eval_points, scenmap_scale):
+    def update(self, samples_batch, scen_maps_batch, eval_points, scenmap_scale, mode: str = "normalized"):
         """
         Update the collision metrics with a new batch of data.
 
@@ -262,40 +262,67 @@ class CollisionEvaluator:
                 - Channel 2 (Green): Walls & forbidden areas.
                 - Channel 3 (Blue): Entrances.
             eval_points (torch.Tensor): Evaluation points mask. Shape: (batch_size, sample_length, 2).
-            scenmap_scale (int or torch.Tensor): Scale factor for the scenario map. Shape: (batch_size, 1) if it is torch.Tensor.
+            scenmap_scale (int, float, or torch.Tensor): Per-axis scale used when converting
+                between world/track units and map pixels. For AugmentedSimulationDataset this is
+                typically a (B, 2) tensor with identical values for x/y. Only used when
+                mode == "unnormalized". Ignored for "normalized" mode.
+            mode (str): "normalized" if samples are in [0,1] map coordinates;
+                "unnormalized" if samples are in world/track units scaled from the map.
         """
-        # Generate a mask for collisions
+        # Build collision mask from scenario map channels (B, C, H, W)
         collision_mask = (scen_maps_batch[:, 0] > 0) | (scen_maps_batch[:, 1] > 0)
 
         batch_size = samples_batch.shape[0]
         sample_length = samples_batch.shape[1]
 
-        # Conver scenmap_scale to a long tensor
-        if not isinstance(scenmap_scale, torch.Tensor):
-            scenmap_scale = torch.full((batch_size, 1), scenmap_scale, device=samples_batch.device, dtype=samples_batch.dtype)
+        H = scen_maps_batch.shape[2]
+        W = scen_maps_batch.shape[3]
+
+        # Convert coordinates to pixel indices depending on mode
+        if mode == "normalized":
+            # samples in [0,1] relative to map width/height; dataset already in image coords
+            x_float = samples_batch[..., 0] * W
+            y_float = samples_batch[..., 1] * H
+        elif mode == "unnormalized":
+            # samples are in world/track units after being scaled by scenmap_scale during generation
+            # Convert back to pixel units by dividing by scenmap_scale per axis
+            if not isinstance(scenmap_scale, torch.Tensor):
+                # broadcast scalar to (B, 2)
+                scenmap_scale = torch.full((batch_size, 2), float(scenmap_scale), device=samples_batch.device, dtype=samples_batch.dtype)
+            else:
+                # Expect shape (B, 2) or (B,)
+                if scenmap_scale.dim() == 1:
+                    scenmap_scale = scenmap_scale.view(batch_size, 1).repeat(1, 2)
+                elif scenmap_scale.shape[-1] == 1:
+                    scenmap_scale = scenmap_scale.view(batch_size, 1).repeat(1, 2)
+            scale_x = scenmap_scale[:, 0].view(batch_size, 1)
+            scale_y = scenmap_scale[:, 1].view(batch_size, 1)
+            # Avoid divide-by-zero
+            eps = torch.finfo(samples_batch.dtype).eps
+            x_float = samples_batch[..., 0] / (scale_x + eps)
+            y_float = samples_batch[..., 1] / (scale_y + eps)
         else:
-            scenmap_scale = scenmap_scale.view(batch_size, 1)
+            raise ValueError(f"Unsupported mode for CollisionEvaluator.update: {mode}")
 
-        # Get x and y coordinates, multiply eval_points to avoid out-of-bounds
-        x = ((samples_batch[..., 0] * eval_points[..., 0]) * scenmap_scale).long()  # Shape: (batch_size, sample_length)
-        # Do we need to reverse the y-axis?
-        # y = (samples_batch[..., 1] * eval_points[..., 1]).long() * scenmap_scale
-        y = ((scen_maps_batch.shape[2] - samples_batch[..., 1] * scenmap_scale) * eval_points[..., 1]).long()  # Shape: (batch_size, sample_length)
+        # Apply eval_points mask to avoid unintended indices; keep float for OOB checks
+        x_float = x_float * eval_points[..., 0]
+        y_float = y_float * eval_points[..., 1]
 
-        # Deal with out-of-bounds indices
-        # If the coordinates are out of bounds, they are collisons
-        collision_position = torch.logical_or(torch.logical_or(x<0, x>=scen_maps_batch.shape[3]), torch.logical_or(y<0, y>=scen_maps_batch.shape[2]))
+        # Out-of-bounds: before clamping, flag as collision if outside map
+        oob_x = (x_float < 0) | (x_float >= (W - 1e-6))
+        oob_y = (y_float < 0) | (y_float >= (H - 1e-6))
+        collision_position = oob_x | oob_y
 
-        # Ensure x and y are within the bounds of the scenario map
-        x = torch.clamp(x, 0, scen_maps_batch.shape[3] - 1)
-        y = torch.clamp(y, 0, scen_maps_batch.shape[2] - 1)
+        # Discretize to integer pixel indices
+        x = x_float.long().clamp(0, W - 1)
+        y = y_float.long().clamp(0, H - 1)
 
         # Generate batch indices
-        batch_indices = torch.arange(batch_size).view(-1, 1).expand(-1, sample_length)  
+        batch_indices = torch.arange(batch_size, device=samples_batch.device).view(-1, 1).expand(-1, sample_length)
 
-        # Check how many samples collide with obstacles under eval_points
-        collision = collision_mask[batch_indices, y, x] * eval_points[..., 0]  # Shape: (batch_size, sample_length)
-        collision = collision.bool() | collision_position  # Combine with collision_position
+        # Collisions against obstacle mask under eval points
+        collision = collision_mask[batch_indices, y, x] * eval_points[..., 0]
+        collision = collision.bool() | collision_position
 
         # Calculate collision rate for the batch, calculated by each sample
         batch_collisions = torch.any(collision, dim=1).sum().item()  # Number of paths with at least one collision
@@ -401,7 +428,7 @@ def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldernam
                 samples_median = samples.median(dim=1).values
                 
                 if collision_evaluator is not None:
-                    collision_evaluator.update(samples_median, scen_map, eval_points, scen_maps_scale)
+                    collision_evaluator.update(samples_median, scen_map, eval_points, scen_maps_scale, mode=mode if mode is not None else "normalized")
 
                 # Append results to the respective lists
                 all_target.append(c_target)
