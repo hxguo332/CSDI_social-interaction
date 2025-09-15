@@ -497,7 +497,14 @@ class CSDI_SimulationScenmap(CSDI_base):
             self.emb_total_dim += 1  # for conditional mask
 
         # use CNN to embed the scenario map
-        self.emb_scenmap = ResnetMapEncoder(output_dim=self.emb_scenmap_dim)
+        me_cfg = (config.get("model", {}).get("map_encoder", {}) if isinstance(config.get("model", {}), dict) else {})
+        grid_size = me_cfg.get("grid_size", 7)
+        finetune_from = me_cfg.get("finetune_from", "layer4")
+        self.emb_scenmap = ResnetMapEncoder(
+            output_dim=self.emb_scenmap_dim,
+            grid_size=grid_size,
+            finetune_from=finetune_from,
+        )
 
         # feature embedding
         self.embed_layer = nn.Embedding(
@@ -625,7 +632,16 @@ class CSDI_SimulationScenmap(CSDI_base):
             observed_data = observed_data * scenmap_scales.unsqueeze(2)  # (B, K, L)
 
         if return_scenmap:
-            return samples, observed_data, target_mask, observed_mask, observed_tp, scenmap, scenmap_scales
+            # Provide raw BGR maps for evaluation if available to keep channel semantics
+            if "scen_map_raw" in batch:
+                scenmap_eval = batch["scen_map_raw"].to(self.device)
+                # Expect (B, H, W, C); convert to (B, C, H, W)
+                if scenmap_eval.dim() == 4 and scenmap_eval.shape[-1] == 3:
+                    scenmap_eval = scenmap_eval.permute(0, 3, 1, 2)
+            else:
+                # Fall back to the normalized RGB map
+                scenmap_eval = scenmap
+            return samples, observed_data, target_mask, observed_mask, observed_tp, scenmap_eval, scenmap_scales
         else:
             return samples, observed_data, target_mask, observed_mask, observed_tp
 

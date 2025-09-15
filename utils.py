@@ -15,7 +15,42 @@ def train(
     batch_sampler_train=None,
     batch_sampler_valid=None,
 ):
-    optimizer = Adam(model.parameters(), lr=config["lr"], weight_decay=1e-6)
+    # Set up optimizer with param groups: smaller LR for ResNet backbone to stabilize fine-tuning
+    base_lr = float(config["lr"])
+    backbone_lr_mult = float(config.get("encoder_backbone_lr_mult", 0.1))
+
+    enc_backbone_params = []
+    enc_head_params = []
+    if hasattr(model, "emb_scenmap"):
+        enc = model.emb_scenmap
+        if hasattr(enc, "backbone"):
+            enc_backbone_params = [p for p in enc.backbone.parameters() if p.requires_grad]
+        if hasattr(enc, "fc"):
+            enc_head_params = [p for p in enc.fc.parameters() if p.requires_grad]
+
+    enc_backbone_ids = set(id(p) for p in enc_backbone_params)
+    enc_head_ids = set(id(p) for p in enc_head_params)
+    excluded = enc_backbone_ids | enc_head_ids
+    other_params = [p for p in model.parameters() if id(p) not in excluded]
+
+    param_groups = []
+    if other_params:
+        param_groups.append({"params": other_params, "lr": base_lr})
+    if enc_head_params:
+        param_groups.append({"params": enc_head_params, "lr": base_lr})
+    if enc_backbone_params:
+        param_groups.append({"params": enc_backbone_params, "lr": max(base_lr * backbone_lr_mult, 1e-8)})
+
+    optimizer = Adam(param_groups if param_groups else model.parameters(), lr=base_lr, weight_decay=1e-6)
+
+    # One-time log: optimizer param groups
+    try:
+        print("[optimizer] param groups:")
+        for i, g in enumerate(optimizer.param_groups):
+            lr_g = g.get("lr", base_lr)
+            print(f"  group[{i}]: lr={lr_g:.3e}, params={len(g['params'])}")
+    except Exception:
+        pass
     if foldername != "":
         output_path = foldername + "/model.pth"
     else:
@@ -28,6 +63,7 @@ def train(
     )
 
     best_valid_loss = 1e10
+    debug_grad_logged = False
     for epoch_no in range(config["epochs"]):
         avg_loss = 0
         model.train()
@@ -43,6 +79,34 @@ def train(
                     continue
 
                 loss.backward()
+
+                # One-time gradient norm logging to confirm training is active
+                if not debug_grad_logged:
+                    try:
+                        grad_out2 = None
+                        if hasattr(model, "diffmodel") and hasattr(model.diffmodel, "output_projection2"):
+                            p = model.diffmodel.output_projection2.weight
+                            if p.grad is not None:
+                                grad_out2 = p.grad.detach().norm().item()
+
+                        grad_enc_fc = None
+                        if hasattr(model, "emb_scenmap") and hasattr(model.emb_scenmap, "fc"):
+                            p = model.emb_scenmap.fc.weight
+                            if p.grad is not None:
+                                grad_enc_fc = p.grad.detach().norm().item()
+
+                        grad_enc_backbone = None
+                        if hasattr(model, "emb_scenmap") and hasattr(model.emb_scenmap, "backbone"):
+                            for p in model.emb_scenmap.backbone.parameters():
+                                if p.requires_grad and p.grad is not None:
+                                    grad_enc_backbone = p.grad.detach().norm().item()
+                                    break
+
+                        print("[grad] norms: output_projection2=", grad_out2, 
+                              ", enc_fc=", grad_enc_fc, ", enc_backbone=", grad_enc_backbone)
+                    except Exception:
+                        pass
+                    debug_grad_logged = True
                 avg_loss += loss.item()
                 optimizer.step()
 
@@ -262,9 +326,9 @@ class CollisionEvaluator:
                 - Channel 2 (Green): Walls & forbidden areas.
                 - Channel 3 (Blue): Entrances.
             eval_points (torch.Tensor): Evaluation points mask. Shape: (batch_size, sample_length, 2).
-            scenmap_scale (int, float, or torch.Tensor): Per-axis scale used when converting
+            scenmap_scale (int, float, or torch.Tensor): Per-axis world-per-pixel (wpp) used when converting
                 between world/track units and map pixels. For AugmentedSimulationDataset this is
-                typically a (B, 2) tensor with identical values for x/y. Only used when
+                typically a (B, 2) tensor; often x/y are equal. Only used when
                 mode == "unnormalized". Ignored for "normalized" mode.
             mode (str): "normalized" if samples are in [0,1] map coordinates;
                 "unnormalized" if samples are in world/track units scaled from the map.

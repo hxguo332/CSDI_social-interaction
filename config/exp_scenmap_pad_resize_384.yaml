@@ -5,23 +5,27 @@ train:
   epochs: 200
   batch_size: 16
   lr: 1.0e-3
-  encoder_backbone_lr_mult: 1.0
+   encoder_backbone_lr_mult: 1.0
   itr_per_epoch: 1.0e+8
   dataloader: augmented
-  augmentation_mode: "crop_and_resize"
+  augmentation_mode: "pad_and_resize"
   resize_options:
     - [384, 384]
-    - [512, 512]
-    - [768, 768]
 
 valid:
   batch_size: 16
-  dataloader: nonaugmented_scenario_batch
+  dataloader: augmented
+  augmentation_mode: "pad_and_resize"
+  resize_options:
+    - [384, 384]
 
 test:
   batch_size: 16
-  dataloader: nonaugmented_scenario_batch
-  return_scen_map: true  # compute collision/invalid metrics in evaluation
+  dataloader: augmented
+  augmentation_mode: "pad_and_resize"
+  resize_options:
+    - [384, 384]
+  return_scen_map: true  # set true to compute collision metrics
 
 diffusion:
   layers: 4

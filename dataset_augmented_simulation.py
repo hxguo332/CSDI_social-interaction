@@ -11,6 +11,11 @@ import cv2
 import numpy as np
 from dataclasses import dataclass
 from typing import Tuple
+try:
+    # Optional import; only used when preprocess_for_resnet=True
+    from torchvision.models import ResNet18_Weights
+except Exception:
+    ResNet18_Weights = None
 
 def resize_map(map_img, target_shape):
     # cv2 expects (width, height)
@@ -20,13 +25,57 @@ def resize_map(map_img, target_shape):
 # --- AugmentedSimulationDataset ---
 
 class AugmentedSimulationDataset(Simulation_Dataset):
-    def __init__(self, *args, augmentation_mode='crop_and_resize', resize_to=(128, 128), debug=False, **kwargs):
+    def __init__(
+        self,
+        *args,
+        augmentation_mode='crop_and_resize',
+        resize_to=(128, 128),
+        debug=False,
+        preprocess_for_resnet=False,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.augmentation_mode = augmentation_mode
         self.default_resize_to = resize_to # (height, width), this is not used if augmentation_mode is None
         self.debug = debug
+        # If True, convert scen_map to RGB float in [0,1] and normalize with ImageNet stats
+        self.preprocess_for_resnet = preprocess_for_resnet
         if not self.load_scenario_map:
             raise ValueError("AugmentedSimulationDataset requires load_scenario_map=True")
+        # Cache ImageNet mean/std from torchvision weights if available
+        if self.preprocess_for_resnet:
+            # Resolve ImageNet mean/std robustly across torchvision versions
+            def _fallback_stats():
+                mean = np.array([0.485, 0.456, 0.406], dtype=np.float32).reshape(1, 1, 3)
+                std = np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(1, 1, 3)
+                return mean, std
+
+            if ResNet18_Weights is None:
+                self._imnet_mean, self._imnet_std = _fallback_stats()
+            else:
+                try:
+                    w = ResNet18_Weights.DEFAULT
+                    mean = std = None
+                    meta = getattr(w, "meta", None)
+                    if isinstance(meta, dict):
+                        mean = meta.get("mean", None)
+                        std = meta.get("std", None)
+                    if mean is None or std is None:
+                        try:
+                            t = w.transforms()
+                            mean = getattr(t, "mean", mean)
+                            std = getattr(t, "std", std)
+                        except Exception:
+                            pass
+                    if mean is None or std is None:
+                        print("⚠️ Warning: Cannot find ImageNet mean/std from torchvision; using fallback values.")
+                        self._imnet_mean, self._imnet_std = _fallback_stats()
+                    else:
+                        self._imnet_mean = np.array(mean, dtype=np.float32).reshape(1, 1, 3)
+                        self._imnet_std = np.array(std, dtype=np.float32).reshape(1, 1, 3)
+                except Exception:
+                    print("⚠️ Warning: Exception when loading torchvision weights; using fallback ImageNet mean/std.")
+                    self._imnet_mean, self._imnet_std = _fallback_stats()
 
     def __getitem__(self, key):
         if isinstance(key, tuple):
@@ -61,31 +110,50 @@ class AugmentedSimulationDataset(Simulation_Dataset):
 
         if self.augmentation_mode == 'crop_and_resize':
             # Use maybe_augment_sample to get the processed scenario map and adjusted track data
-            scen_map_processed, adjusted_values, rescale = self.maybe_augment_sample(
+            scen_map_processed, adjusted_values, ppw = self.maybe_augment_sample(
                 scen_map_raw, observed_values, observed_masks, desired_crop_size
             )
             # Use actual shape of the processed scenario map
             resize_shape = resize_to
         elif self.augmentation_mode == 'pad_and_resize':
-            final_map, adjusted_values, scale = self.pad_and_resize_with_track(scen_map_raw, observed_values, desired_crop_size)
+            final_map, adjusted_values, ppw = self.pad_and_resize_with_track(scen_map_raw, observed_values, desired_crop_size)
             scen_map_processed = final_map
-            rescale = scale
             resize_shape = resize_to
             #return final_map, adjusted_values, scale # 1.0 scale means no scaling applied
         elif self.augmentation_mode == None:
-            rescale = self.scen_map_base_scale
+            # No augmentation: per-axis pixels-per-world
+            ppw = np.array([self.scen_map_base_scale, self.scen_map_base_scale], dtype=np.float32)
             # convert the coordinates according to the scenario map size
             adjusted_values = self.convert_to_track_coordinates(observed_values, scen_map_raw.shape[0])
             scen_map_processed = scen_map_raw
             resize_shape = (-1, -1) # Indicate no resizing applied
         
-        # Try to make the rescale a number between 0 and 1
-        rescale = rescale / 100 # The scale is the real scale applied to the scenario map regarding the original scenario map size. (The original scenario map size should be based on the track coordinates)
+        # Convert pixels-per-world (ppw) to world-per-pixel (wpp) per-axis for downstream use
+        # Guard against division by zero
+        ppw = np.array(ppw, dtype=np.float32)
+        wpp = 1.0 / np.clip(ppw, 1e-8, None)
 
         # Normalize adjusted track coordinates to [0, 1] based on final scenario map shape
         map_height, map_width = scen_map_processed.shape[:2]
         map_size = np.array([map_width, map_height], dtype=np.float32)
         adjusted_values = adjusted_values / map_size  # shape (T, 2)
+
+        # Optional: preprocess scenario map for torchvision ResNet
+        # Expected by pretrained ResNet: RGB, float32 in [0,1], then ImageNet mean/std normalization
+        if self.preprocess_for_resnet:
+            # Keep a raw copy (BGR uint8/float in [0,255]) for evaluation/collision metrics
+            scen_map_raw = scen_map_processed.copy()
+            img = scen_map_processed
+            # Ensure float32 and [0,1]
+            if img.dtype != np.float32:
+                img = img.astype(np.float32)
+            if img.max() > 1.0:
+                img = img / 255.0
+            # Convert BGR (OpenCV) -> RGB
+            img = img[:, :, ::-1]
+            # ImageNet normalization
+            img = (img - self._imnet_mean) / self._imnet_std
+            scen_map_processed = img
 
         s = {
             'observed_data': adjusted_values,
@@ -94,9 +162,12 @@ class AugmentedSimulationDataset(Simulation_Dataset):
             'timepoints': np.arange(self.data_length),
             'person_ids': person_ids,
             'scen_map': scen_map_processed,
-            'scen_map_scale': np.full(2, rescale),
+            'scen_map_scale': wpp.astype(np.float32),
             'resize_shape': resize_shape
         }
+        if self.preprocess_for_resnet:
+            # Provide raw BGR map for downstream evaluation (collision metrics)
+            s['scen_map_raw'] = scen_map_raw
         return s
 
     def crop_map_and_adjust_track(self, scen_map_raw, observed_values, observed_masks, desired_aspect, min_bbox_ratio=0.15):
@@ -227,10 +298,17 @@ class AugmentedSimulationDataset(Simulation_Dataset):
         if final_map.size == 0:
             raise ValueError("Empty image after crop!")
 
-        final_scale = self.scen_map_base_scale * (scale_x + scale_y) / 2
-        # print(f"Final scale after random crop and resize: {final_scale}")
+        # Compute per-axis pixels-per-world scale after augmentation
+        ppw_x = self.scen_map_base_scale * scale_x
+        ppw_y = self.scen_map_base_scale * scale_y
+        final_scale = np.array([ppw_x, ppw_y], dtype=np.float32)
         # Insert scale range check
-        if final_scale < 0.01 or final_scale > 100.0 or np.isnan(final_scale) or np.isinf(final_scale):
+        if (
+            np.any(final_scale < 1e-6)
+            or np.any(final_scale > 1e6)
+            or np.isnan(final_scale).any()
+            or np.isinf(final_scale).any()
+        ):
             print(f"⚠️ Rejected sample due to extreme scale: {final_scale}")
             print(f"[DEBUG] scen_map_raw.shape = {scen_map_raw.shape}")
             print(f"[DEBUG] observed_values (scaled and flipped):\n{observed_values}")
@@ -249,8 +327,8 @@ class AugmentedSimulationDataset(Simulation_Dataset):
 
     def maybe_augment_sample(self, scen_map_raw, observed_values, observed_masks, desired_crop_size):
         """
-        With 50% probability, apply nandom_crop_and_resize_with_track, otherwise return original data.
-        The retured scale here means the scale applied to the track coordinates. For example, if the coordinates is 10 times larger than the original, the scale will be 10.
+        With 50% probability, apply random_crop_and_resize_with_track; otherwise pad+resize.
+        Returns per-axis pixels-per-world (ppw) scales reflecting augmentation.
         """
         if random.random() < 0.5:
             #observed_values = self.convert_to_track_coordinates(observed_values, scen_map_raw.shape[0])
@@ -286,10 +364,17 @@ class AugmentedSimulationDataset(Simulation_Dataset):
         if final_map.size == 0:
             raise ValueError("Empty image after pad and resize!")
 
-        final_scale = self.scen_map_base_scale * (scale_x + scale_y) / 2
-        #print(f"Final scale after pad and resize: {final_scale}")
+        # Compute per-axis pixels-per-world scale after augmentation
+        ppw_x = self.scen_map_base_scale * scale_x
+        ppw_y = self.scen_map_base_scale * scale_y
+        final_scale = np.array([ppw_x, ppw_y], dtype=np.float32)
         # Insert scale range check for pad_and_resize_with_track
-        if final_scale < 0.01 or final_scale > 100.0 or np.isnan(final_scale) or np.isinf(final_scale):
+        if (
+            np.any(final_scale < 1e-6)
+            or np.any(final_scale > 1e6)
+            or np.isnan(final_scale).any()
+            or np.isinf(final_scale).any()
+        ):
             print(f"⚠️ Rejected padded sample due to extreme scale: {final_scale}")
             #raise ValueError(f"Extreme final scale in pad and resize: {final_scale}")
         return final_map, track_resized, final_scale
@@ -305,7 +390,8 @@ def get_augmented_dataloader_old(
     resize_options=[(384, 384), (512, 512), (768, 768)], # List of (height, width) tuples
     augmentation_mode='crop_and_resize',
     part="train",
-    debug=False
+    debug=False,
+    preprocess_for_resnet=True,
 ):
     from torch.utils.data import DataLoader
     assert part in ["train", "valid", "test"], "part must be 'train',  'valid' or 'test'"
@@ -318,6 +404,7 @@ def get_augmented_dataloader_old(
             load_scenario_map=load_scenario_map,
             zero_based_position=zero_based_position,
             augmentation_mode=augmentation_mode,
+            preprocess_for_resnet=preprocess_for_resnet,
             debug=debug
         )
         wrapped_dataset = ResizeWrapperDataset(base_dataset, resize_options, batch_size)
@@ -343,6 +430,7 @@ def get_augmented_dataloader(
     distributed=False,
     drop_last=True,
     num_workers=8,
+    preprocess_for_resnet=True,
 ):
     assert part in ["train", "valid", "test"]
     base_dataset = AugmentedSimulationDataset(
@@ -354,6 +442,7 @@ def get_augmented_dataloader(
         zero_based_position=zero_based_position,
         augmentation_mode=augmentation_mode,
         resize_to=resize_options[0],  # 只是默认值；真正按批的来自 sampler
+        preprocess_for_resnet=preprocess_for_resnet,
         debug=debug,
     )
 
@@ -392,6 +481,7 @@ def get_nonaugmented_dataloader_with_scenario_batches(
     zero_based_position=True,
     debug=False,
     part="train",
+    preprocess_for_resnet=True,
 ):
     assert part in ["train", "valid", "test"], "part must be 'train',  'valid' or 'test'"
     def build_loader(mode):
@@ -403,6 +493,7 @@ def get_nonaugmented_dataloader_with_scenario_batches(
             load_scenario_map=load_scenario_map,
             zero_based_position=zero_based_position,
             augmentation_mode=None,  # No augmentation applied
+            preprocess_for_resnet=preprocess_for_resnet,
             debug=debug,
         )
         return ScenarioBatchDataLoader(dataset, batch_size=batch_size, shuffle=(mode == 'train'))

@@ -210,7 +210,6 @@ class Simulation_Dataset(Dataset):
         return person_info, sim_info
         
     def __getitem__(self, index):
-        rescale = False
         index, scenario = self.get_index(index)
         track = self.data[scenario][index]
 
@@ -234,12 +233,9 @@ class Simulation_Dataset(Dataset):
         }
         if self.load_scenario_map:
             s['scen_map'] = self.scen_map[scenario]
-            if not rescale:
-                # if there is no rescale for the scenario map, we use the original scale
-                s['scen_map_scale'] = np.full(2, self.scen_map_base_scale) # should be 2D
-            else:
-                # if there is a rescale for the scenario map, we use the rescaled scale
-                s['scen_map_scale'] = rescale
+            # Provide world-per-pixel (wpp) per axis for consistency with augmented dataset
+            wpp = 1.0 / np.clip(np.array([self.scen_map_base_scale, self.scen_map_base_scale], dtype=np.float32), 1e-8, None)
+            s['scen_map_scale'] = wpp
             H = s['scen_map'].shape[0]
             # convert observed values to left-top coordinates from the left-down coordinates
             observed_values =self.convert_to_track_coordinates(observed_values, H)

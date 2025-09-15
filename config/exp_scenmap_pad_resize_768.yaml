@@ -5,6 +5,7 @@ train:
   epochs: 200
   batch_size: 16
   lr: 1.0e-3
+  encoder_backbone_lr_mult: 1.0
   itr_per_epoch: 1.0e+8
   dataloader: augmented
   augmentation_mode: "pad_and_resize"
@@ -43,7 +44,9 @@ model:
   featureemb: 16
   scenmapemb: 256
   target_strategy: "random"
+  map_encoder:
+    grid_size: 7
+    finetune_from: "layer4"
 
 dataset:
   scenarios: null
-
