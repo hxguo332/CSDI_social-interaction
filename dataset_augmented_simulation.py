@@ -182,11 +182,12 @@ class AugmentedSimulationDataset(Simulation_Dataset):
         max_y = np.ceil(max_y)
         bbox_w = max_x - min_x
         bbox_h = max_y - min_y
-        # Insert warning for invalid bbox
+        # Insert warning for invalid bbox (silenced unless debug=True)
         if bbox_w <= 0 or bbox_h <= 0:
-            print("Warning: Invalid bounding box dimensions.")
-            print(f"min_x = {min_x}, max_x = {max_x}, bbox_w = {bbox_w}")
-            print(f"min_y = {min_y}, max_y = {max_y}, bbox_h = {bbox_h}")
+            if self.debug:
+                print("Warning: Invalid bounding box dimensions.")
+                print(f"min_x = {min_x}, max_x = {max_x}, bbox_w = {bbox_w}")
+                print(f"min_y = {min_y}, max_y = {max_y}, bbox_h = {bbox_h}")
 
         # Ensure bbox is not too small compared to image size (using min_bbox_ratio)
         min_bbox_w = int(min_bbox_ratio * W)
