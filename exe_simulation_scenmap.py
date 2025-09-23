@@ -7,7 +7,7 @@ import os
 
 from main_model import CSDI_SimulationScenmap
 from dataset_simulation import get_dataloader
-from utils import train, evaluate
+from utils import train, evaluate, build_preproc_tag_from_split_cfg
 
 def save_config(config, args):
     """Save configuration and args to a folder with timestamp."""
@@ -50,8 +50,8 @@ if __name__ == "__main__":
 
     print(json.dumps(config, indent=4))
 
-    # Call the function to save the config and get the folder name
-    foldername = save_config(config, args)
+    # Prepare output folder and persist config+args
+    foldername = args.modelfolder or save_config(config, args)
 
     train_loader, valid_loader, test_loader = get_dataloader(
         scenarios=config["dataset"]["scenarios"],
@@ -76,4 +76,6 @@ if __name__ == "__main__":
     else:
         model.load_state_dict(torch.load("./save/" + args.modelfolder + "/model.pth"))
 
-    evaluate(model, test_loader, nsample=args.nsample, scaler=1, foldername=foldername)
+    # Non-augmented dataloader here; tag filenames accordingly
+    preproc_tag = "nonaug"
+    evaluate(model, test_loader, nsample=args.nsample, scaler=1, foldername=foldername, file_tag=preproc_tag)

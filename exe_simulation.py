@@ -42,7 +42,8 @@ train_loader, valid_loader, test_loader = get_dataloader(
     data_length=args.data_length,
     seed=args.seed,
     batch_size=config["train"]["batch_size"],
-    zero_based_position=True
+    zero_based_position=True,
+    load_scenario_map=True,
     #missing_ratio=config["model"]["test_missing_ratio"],
 )
 
@@ -59,4 +60,12 @@ if args.modelfolder == "":
 else:
     model.load_state_dict(torch.load("./save/" + args.modelfolder + "/model.pth"))
 
-evaluate(model, test_loader, nsample=args.nsample, scaler=1, foldername=foldername)
+evaluate(
+    model,
+    test_loader,
+    nsample=args.nsample,
+    scaler=1,
+    foldername=foldername,
+    return_scen_map=True,
+    mode="normalized",
+)

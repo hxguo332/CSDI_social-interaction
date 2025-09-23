@@ -46,6 +46,7 @@ class AugmentedSimulationDataset(Simulation_Dataset):
         if self.preprocess_for_resnet:
             # Resolve ImageNet mean/std robustly across torchvision versions
             def _fallback_stats():
+                print("⚠️ Warning: Using fallback ImageNet mean/std values.")
                 mean = np.array([0.485, 0.456, 0.406], dtype=np.float32).reshape(1, 1, 3)
                 std = np.array([0.229, 0.224, 0.225], dtype=np.float32).reshape(1, 1, 3)
                 return mean, std
@@ -71,6 +72,7 @@ class AugmentedSimulationDataset(Simulation_Dataset):
                         print("⚠️ Warning: Cannot find ImageNet mean/std from torchvision; using fallback values.")
                         self._imnet_mean, self._imnet_std = _fallback_stats()
                     else:
+                        print(f"Using ImageNet mean: {mean}, std: {std} for ResNet preprocessing")
                         self._imnet_mean = np.array(mean, dtype=np.float32).reshape(1, 1, 3)
                         self._imnet_std = np.array(std, dtype=np.float32).reshape(1, 1, 3)
                 except Exception:
@@ -149,8 +151,8 @@ class AugmentedSimulationDataset(Simulation_Dataset):
                 img = img.astype(np.float32)
             if img.max() > 1.0:
                 img = img / 255.0
-            # Convert BGR (OpenCV) -> RGB
-            img = img[:, :, ::-1]
+            # Scenario map is already RGB image, no need to Convert BGR (OpenCV) -> RGB
+            # img = img[:, :, ::-1]
             # ImageNet normalization
             img = (img - self._imnet_mean) / self._imnet_std
             scen_map_processed = img
@@ -166,7 +168,7 @@ class AugmentedSimulationDataset(Simulation_Dataset):
             'resize_shape': resize_shape
         }
         if self.preprocess_for_resnet:
-            # Provide raw BGR map for downstream evaluation (collision metrics)
+            # Provide raw RGB map for downstream evaluation (collision metrics)
             s['scen_map_raw'] = scen_map_raw
         return s
 

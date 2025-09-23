@@ -3,6 +3,7 @@ import torch
 from torch.optim import Adam
 from tqdm import tqdm
 import pickle
+from typing import Optional
 
 
 def train(
@@ -196,23 +197,17 @@ def calc_quantile_CRPS_sum(target, forecast, eval_points, mean_scaler, scaler):
         CRPS += q_loss / denom
     return CRPS / len(quantiles)
 
-def process_batch_data(output, return_scen_map):
+def process_batch_data(output):
     """
     Process and permute batch data for evaluation.
 
     Args:
         output: Output from the model's evaluation method.
-        return_scen_map: Whether scenario mapping is included in the output.
 
     Returns:
         Processed tensors for samples, target, eval_points, observed_points, and observed_time.
     """
-    scen_map = None
-    scen_map_scale = None
-    if return_scen_map:
-        samples, c_target, eval_points, observed_points, observed_time, scen_map, scen_map_scale = output
-    else:
-        samples, c_target, eval_points, observed_points, observed_time = output
+    samples, c_target, eval_points, observed_points, observed_time = output
 
     # Permute dimensions for further processing
     samples = samples.permute(0, 1, 3, 2)  # (B, nsample, L, K)
@@ -220,7 +215,7 @@ def process_batch_data(output, return_scen_map):
     eval_points = eval_points.permute(0, 2, 1)
     observed_points = observed_points.permute(0, 2, 1)
 
-    return samples, c_target, eval_points, observed_points, observed_time, scen_map, scen_map_scale
+    return samples, c_target, eval_points, observed_points, observed_time, 
 
 
 def compute_batch_metrics(samples_median, c_target, eval_points, scaler):
@@ -247,7 +242,7 @@ def compute_batch_metrics(samples_median, c_target, eval_points, scaler):
     return mse_current.sum().item(), mae_current.sum().item()
 
 
-def save_generated_outputs(foldername, nsample, all_target, all_evalpoint, all_observed_point, all_observed_time, all_generated_samples, scaler, mean_scaler, mode=None):
+def save_generated_outputs(foldername, nsample, all_target, all_evalpoint, all_observed_point, all_observed_time, all_generated_samples, scaler, mean_scaler, mode=None, tag=None):
     """
     Save generated outputs to a pickle file.
 
@@ -258,10 +253,13 @@ def save_generated_outputs(foldername, nsample, all_target, all_evalpoint, all_o
         scaler: Scaling factor for the target values.
         mean_scaler: Mean scaler for the target values.
     """
+    suffix_parts = []
     if mode is not None:
-        file_path = foldername + f"/generated_outputs_nsample{nsample}_{mode}.pk"
-    else:
-        file_path = foldername + f"/generated_outputs_nsample{nsample}.pk"
+        suffix_parts.append(str(mode))
+    if tag is not None and str(tag):
+        suffix_parts.append(str(tag))
+    suffix = ("_" + "_".join(suffix_parts)) if suffix_parts else ""
+    file_path = foldername + f"/generated_outputs_nsample{nsample}{suffix}.pk"
     with open(file_path, "wb") as f:
         pickle.dump(
             [
@@ -421,7 +419,7 @@ class CollisionEvaluator:
         return collision_rate, invalid_rate
 
 
-def save_evaluation_metrics(foldername, nsample, metrics_dict, mode=None):
+def save_evaluation_metrics(foldername, nsample, metrics_dict, mode=None, tag=None):
     """
     Save evaluation metrics to a CSV file.
 
@@ -431,17 +429,20 @@ def save_evaluation_metrics(foldername, nsample, metrics_dict, mode=None):
         metrics_dict: Dictionary containing evaluation metrics (RMSE, MAE, CRPS, etc.).
         mode: Sampling mode, either "normalized" or "unnormalized" (optional).
     """
+    suffix_parts = []
     if mode is not None:
-        result_path = foldername + f"/result_nsample{nsample}_{mode}.csv"
-    else:
-        result_path = foldername + f"/result_nsample{nsample}.csv"
+        suffix_parts.append(str(mode))
+    if tag is not None and str(tag):
+        suffix_parts.append(str(tag))
+    suffix = ("_" + "_".join(suffix_parts)) if suffix_parts else ""
+    result_path = foldername + f"/result_nsample{nsample}{suffix}.csv"
     with open(result_path, "w") as f:
         f.write("Metric,Value\n")
         for key, value in metrics_dict.items():
             f.write(f"{key},{value}\n")
 
 
-def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldername="", return_scen_map=False, mode="unnormalized"):
+def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldername="", eval_collision=False, mode=None, file_tag=None):
     """
     Evaluate the model on the test dataset and compute various metrics.
 
@@ -452,8 +453,8 @@ def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldernam
         scaler: Scaling factor for the target values.
         mean_scaler: Mean scaler for the target values.
         foldername: Directory to save evaluation results and generated outputs.
-        return_scen_map: Whether scenario map is returned in each batch in dataloader (optional).
-        mode: Sampling mode, either "normalized" or "unnormalized".
+        eval_collision: Whether to compute collision metrics (collision rate and invalid rate).
+        mode: Sampling mode, either "normalized" or "unnormalized". If None, do not pass mode to model.evaluate.
 
     Returns:
         None. Saves evaluation metrics and generated outputs to files.
@@ -463,7 +464,7 @@ def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldernam
         mse_total, mae_total, evalpoints_total = 0, 0, 0
 
         collision_evaluator = None
-        if return_scen_map:
+        if eval_collision:
             collision_evaluator = CollisionEvaluator()
 
         all_target, all_observed_point, all_observed_time = [], [], []
@@ -471,28 +472,67 @@ def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldernam
 
         with tqdm(test_loader, mininterval=5.0, maxinterval=50.0) as it:
             for batch_no, test_batch in enumerate(it, start=1):
-
-                if return_scen_map:
-                    # Evaluate the model on the current batch
-                    if mode is not None:
-                        output = model.evaluate(test_batch, nsample, return_scenmap=True, mode=mode)
+                if batch_no == 1:
+                    print("Evaluating with nsample =", nsample)
+                    print("  mode =", mode)
+                    print("  eval_collision =", eval_collision)
+                    if eval_collision:
+                        if "scen_map_raw" in test_batch:
+                            print("  Using scen_map_raw from dataloader for collision evaluation")
+                        elif "scen_map" in test_batch:
+                            print("  Using scen_map from dataloader for collision evaluation")
                     else:
-                        output = model.evaluate(test_batch, nsample, return_scenmap=True)
-                    # Process batch data
-                    samples, c_target, eval_points, observed_points, observed_time, scen_map, scen_maps_scale = process_batch_data(output, return_scen_map)
-                else:
-                    # Evaluate the model on the current batch
+                        print("  Collision evaluation disabled")
+
+                # Best-effort call to model.evaluate compatible with both original and scenemap models
+                try:
                     if mode is not None:
                         output = model.evaluate(test_batch, nsample, mode=mode)
                     else:
                         output = model.evaluate(test_batch, nsample)
-                    # Process batch data
-                    samples, c_target, eval_points, observed_points, observed_time, scen_map, scen_maps_scale = process_batch_data(output, return_scen_map)
+                except TypeError:
+                    # Fallback for models without extra kwargs
+                    output = model.evaluate(test_batch, nsample)
+
+                samples, c_target, eval_points, observed_points, observed_time = process_batch_data(output)
                 # Compute the median of the generated samples
                 samples_median = samples.median(dim=1).values
-                
+
                 if collision_evaluator is not None:
-                    collision_evaluator.update(samples_median, scen_map, eval_points, scen_maps_scale, mode=mode if mode is not None else "normalized")
+                    # Always use scen_map from batch (raw or original). Do not use scen_map_out returned by the model,
+                    # as it is normalized and unsuitable for collision evaluation.
+                    scen_map_tensor = None
+                    scen_maps_scale_tensor = None
+
+                    batch_map = None
+                    if isinstance(test_batch, dict) and ("scen_map_raw" in test_batch):
+                        batch_map = test_batch["scen_map_raw"]
+                    elif isinstance(test_batch, dict) and ("scen_map" in test_batch):
+                        batch_map = test_batch["scen_map"]
+
+                    if batch_map is not None:
+                        if isinstance(batch_map, torch.Tensor):
+                            bm = batch_map
+                        else:
+                            bm = torch.from_numpy(batch_map)
+                        # Expect (B,H,W,3); convert to (B,3,H,W)
+                        if bm.dim() == 4 and bm.shape[-1] == 3:
+                            bm = bm.permute(0, 3, 1, 2)
+                        scen_map_tensor = bm.to(samples_median.device).float()
+
+                    if isinstance(test_batch, dict) and ("scen_map_scale" in test_batch):
+                        sms = test_batch["scen_map_scale"]
+                        if isinstance(sms, torch.Tensor):
+                            scen_maps_scale_tensor = sms.to(samples_median.device).float()
+                        else:
+                            scen_maps_scale_tensor = torch.from_numpy(sms).to(samples_median.device).float()
+
+                    if scen_maps_scale_tensor is None and eval_collision:
+                        print("⚠️ Warning: scen_map_scale not found in test batch; The evaluation is stopped.")
+
+                    ce_mode = mode if mode is not None else "normalized"
+                    if (scen_map_tensor is not None) and (scen_maps_scale_tensor is not None):
+                        collision_evaluator.update(samples_median, scen_map_tensor, eval_points, scen_maps_scale_tensor, mode=ce_mode)
 
                 # Append results to the respective lists
                 all_target.append(c_target)
@@ -522,7 +562,7 @@ def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldernam
         # Save generated outputs
         save_generated_outputs(foldername, nsample, torch.cat(all_target, dim=0), torch.cat(all_evalpoint, dim=0),
                                torch.cat(all_observed_point, dim=0), torch.cat(all_observed_time, dim=0),
-                               torch.cat(all_generated_samples, dim=0), scaler, mean_scaler, mode)
+                               torch.cat(all_generated_samples, dim=0), scaler, mean_scaler, mode, tag=file_tag)
 
         # Compute CRPS metrics
         CRPS, CRPS_sum = compute_crps_metrics(torch.cat(all_target, dim=0), torch.cat(all_generated_samples, dim=0),
@@ -552,10 +592,49 @@ def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldernam
                 "CRPS": CRPS,
                 "CRPS_sum": CRPS_sum,
             }
-        save_evaluation_metrics(foldername, nsample, metrics_dict, mode)
+        save_evaluation_metrics(foldername, nsample, metrics_dict, mode, tag=file_tag)
 
         # Print evaluation metrics
         print("RMSE:", RMSE)
         print("MAE:", MAE)
         print("CRPS:", CRPS)
         print("CRPS_sum:", CRPS_sum)
+
+
+def build_preproc_tag_from_split_cfg(split_cfg: dict, fallback_name: Optional[str] = None) -> Optional[str]:
+    """
+    Build a concise preprocessing tag from a split's dataloader config.
+
+    Examples:
+    - augmented + pad_and_resize + [[512,512]] -> "pad_and_resize_512x512"
+    - augmented + crop_and_resize + [[384,384],[512,512]] -> "crop_and_resize_multi2"
+    - nonaugmented/nonaugmented_scenario_batch/scenario_batch -> "nonaug"
+
+    Returns a short string or None if it can't be inferred.
+    """
+    if not isinstance(split_cfg, dict):
+        return fallback_name
+
+    dl_type = split_cfg.get("dataloader")
+    if dl_type in ("nonaugmented", "nonaugmented_scenario_batch", "scenario_batch"):
+        return "nonaug"
+
+    if dl_type == "augmented":
+        mode = split_cfg.get("augmentation_mode", "pad_and_resize")
+        sizes = split_cfg.get("resize_options", None)
+        if isinstance(sizes, (list, tuple)) and len(sizes) > 0:
+            # Normalize sizes list to list of (h,w)
+            norm = []
+            for s in sizes:
+                try:
+                    h, w = int(s[0]), int(s[1])
+                    norm.append(f"{h}x{w}")
+                except Exception:
+                    continue
+            if len(norm) == 1:
+                return f"{mode}_{norm[0]}"
+            elif len(norm) > 1:
+                return f"{mode}_multi{len(norm)}"
+        return mode
+
+    return fallback_name

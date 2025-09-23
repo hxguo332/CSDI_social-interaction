@@ -25,7 +25,7 @@ test:
   augmentation_mode: "pad_and_resize"
   resize_options:
     - [512, 512]
-  return_scen_map: true  # set true to compute collision metrics
+  eval_collision: true  # set true to compute collision metrics
 
 diffusion:
   layers: 4

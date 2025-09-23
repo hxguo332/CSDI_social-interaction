@@ -491,7 +491,6 @@ class CSDI_SimulationScenmap(CSDI_base):
             nn.Linear(16, self.scale_embed_dim),
         )
 
-        # TODO: add the shape of the scenario map
         self.emb_total_dim = self.emb_time_dim + self.emb_feature_dim + self.emb_scenmap_dim + self.scale_embed_dim # we can add the shape later
         if self.is_unconditional == False:
             self.emb_total_dim += 1  # for conditional mask
@@ -592,7 +591,7 @@ class CSDI_SimulationScenmap(CSDI_base):
 
         return loss_func(observed_data, cond_mask, observed_mask, side_info, is_train)
 
-    def evaluate(self, batch, n_samples, return_scenmap=False, mode="normalized"):
+    def evaluate(self, batch, n_samples, mode="normalized"):
         (
             observed_data, # groundtruth data
             observed_mask,
@@ -631,19 +630,7 @@ class CSDI_SimulationScenmap(CSDI_base):
             samples = samples * scenmap_scales.unsqueeze(1).unsqueeze(3)  # (B, nsample, K, L)
             observed_data = observed_data * scenmap_scales.unsqueeze(2)  # (B, K, L)
 
-        if return_scenmap:
-            # Provide raw BGR maps for evaluation if available to keep channel semantics
-            if "scen_map_raw" in batch:
-                scenmap_eval = batch["scen_map_raw"].to(self.device)
-                # Expect (B, H, W, C); convert to (B, C, H, W)
-                if scenmap_eval.dim() == 4 and scenmap_eval.shape[-1] == 3:
-                    scenmap_eval = scenmap_eval.permute(0, 3, 1, 2)
-            else:
-                # Fall back to the normalized RGB map
-                scenmap_eval = scenmap
-            return samples, observed_data, target_mask, observed_mask, observed_tp, scenmap_eval, scenmap_scales
-        else:
-            return samples, observed_data, target_mask, observed_mask, observed_tp
+        return samples, observed_data, target_mask, observed_mask, observed_tp
 
     def process_data(self, batch):
         observed_data = batch["observed_data"].to(self.device).float()

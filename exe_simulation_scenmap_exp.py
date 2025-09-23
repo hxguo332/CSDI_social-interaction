@@ -10,7 +10,7 @@ from dataset_augmented_simulation import (
     get_augmented_dataloader,
     get_nonaugmented_dataloader_with_scenario_batches,
 )
-from utils import train, evaluate
+from utils import train, evaluate, build_preproc_tag_from_split_cfg
 
 
 def save_config(config, args):
@@ -136,14 +136,16 @@ if __name__ == "__main__":
 
     # Evaluation
     sample_mode = args.sample_mode
-    return_scen_map = config.get("test", {}).get("return_scen_map", False)
+    eval_collision = config.get("test", {}).get("eval_collision", False)
+    # Derive a preprocessing tag from the test split config for filename suffixing
+    preproc_tag = build_preproc_tag_from_split_cfg(config.get("test", {}), fallback_name=None)
     evaluate(
         model,
         test_loader,
         nsample=args.nsample,
         scaler=1,
         foldername=foldername,
-        return_scen_map=return_scen_map,
         mode=sample_mode,
+        eval_collision=eval_collision,
+        file_tag=preproc_tag,
     )
-

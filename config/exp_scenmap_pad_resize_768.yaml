@@ -25,7 +25,7 @@ test:
   augmentation_mode: "pad_and_resize"
   resize_options:
     - [768, 768]
-  return_scen_map: true  # set true to compute collision metrics
+  eval_collision: true  # set true to compute collision metrics
 
 diffusion:
   layers: 4
@@ -45,7 +45,7 @@ model:
   scenmapemb: 256
   target_strategy: "random"
   map_encoder:
-    grid_size: 7
+    grid_size: 1
     finetune_from: "layer4"
 
 dataset:

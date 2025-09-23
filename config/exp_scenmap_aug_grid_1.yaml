@@ -1,5 +1,5 @@
 
-# All splits use non-augmented ScenarioBatchDataLoader
+# All splits use augmented dataloaders with per-split augmentation settings
 
 train:
   epochs: 200
@@ -7,15 +7,27 @@ train:
   lr: 1.0e-3
   encoder_backbone_lr_mult: 1.0
   itr_per_epoch: 1.0e+8
-  dataloader: nonaugmented_scenario_batch
+  dataloader: augmented
+  augmentation_mode: "crop_and_resize"
+  # Options for resize: [height, width]
+  resize_options:
+    - [384, 384]
+    - [512, 512]
+    - [768, 768]
 
 valid:
   batch_size: 16
-  dataloader: nonaugmented_scenario_batch
+  dataloader: augmented
+  augmentation_mode: "pad_and_resize"
+  resize_options:
+    - [512, 512]
 
 test:
   batch_size: 16
-  dataloader: nonaugmented_scenario_batch
+  dataloader: augmented
+  augmentation_mode: "pad_and_resize"
+  resize_options:
+    - [512, 512]
   eval_collision: true  # set true to compute collision metrics
 
 diffusion:
@@ -36,7 +48,7 @@ model:
   scenmapemb: 256
   target_strategy: "random"
   map_encoder:
-    grid_size: 7
+    grid_size: 1
     finetune_from: "layer4"
 
 dataset:

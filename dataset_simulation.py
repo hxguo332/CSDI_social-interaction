@@ -223,23 +223,32 @@ class Simulation_Dataset(Dataset):
 
         
         # Store all processed information in a dictionary
+        # Compute scenario map pixel dimensions from scenario map info (works even if map not loaded)
+        pos = self.scen_map_info[scenario]["position"]
+        width_world = abs(pos["p2"][0] - pos["p1"][0])
+        height_world = abs(pos["p2"][1] - pos["p1"][1])
+        W_px = int(width_world * self.scen_map_base_scale)
+        H_px = int(height_world * self.scen_map_base_scale)
+
+        # Convert to map pixel coordinates (left-top origin) and then normalize to [0,1]
+        observed_vals_px = observed_values.copy() * self.scen_map_base_scale
+        observed_vals_px[:, 1] = H_px - observed_vals_px[:, 1]
+        # Normalize by final map size (width, height)
+        norm_div = np.array([W_px, H_px], dtype=np.float32)
+        observed_vals_norm = observed_vals_px / np.clip(norm_div, 1e-8, None)
+
         s = {
-            'observed_data': observed_values, # this is the left-down coordinates
+            'observed_data': observed_vals_norm.astype(np.float32),  # normalized [0,1] like AugmentedSimulationDataset
             'observed_mask': observed_masks,
             'gt_mask': gt_masks,
-            #'timepoints': time_points, # should I use the actual timepoints or the index? 
-            'timepoints': np.arange(self.data_length), # should I use the actual timepoints or the index? 
+            'timepoints': np.arange(self.data_length),
             'person_ids': person_ids,
         }
         if self.load_scenario_map:
             s['scen_map'] = self.scen_map[scenario]
-            # Provide world-per-pixel (wpp) per axis for consistency with augmented dataset
-            wpp = 1.0 / np.clip(np.array([self.scen_map_base_scale, self.scen_map_base_scale], dtype=np.float32), 1e-8, None)
-            s['scen_map_scale'] = wpp
-            H = s['scen_map'].shape[0]
-            # convert observed values to left-top coordinates from the left-down coordinates
-            observed_values =self.convert_to_track_coordinates(observed_values, H)
-            s['observed_data'] = observed_values 
+        # Provide world-per-pixel (wpp) per axis for consistency with augmented dataset
+        wpp = 1.0 / np.clip(np.array([self.scen_map_base_scale, self.scen_map_base_scale], dtype=np.float32), 1e-8, None)
+        s['scen_map_scale'] = wpp
         return s
 
     def get_index(self, index):
@@ -264,13 +273,13 @@ class Simulation_Dataset(Dataset):
 def get_dataloader(data_length, seed, scenarios=None,batch_size=8, load_scenario_map=False, zero_based_position=False):
     dataset = Simulation_Dataset(data_length, subset_split_seed=seed, scenarios=scenarios, mode='train', load_scenario_map=load_scenario_map, zero_based_position=zero_based_position)
     train_loader = ScenarioBatchDataLoader(
-        dataset, batch_size=batch_size, shuffle=1)
+        dataset, batch_size=batch_size, shuffle=True)
     valid_dataset = Simulation_Dataset(data_length,subset_split_seed=seed, scenarios=scenarios, mode='valid', load_scenario_map=load_scenario_map, zero_based_position=zero_based_position)
     valid_loader = ScenarioBatchDataLoader(
-        valid_dataset, batch_size=batch_size, shuffle=0)
+        valid_dataset, batch_size=batch_size, shuffle=False)
     test_dataset = Simulation_Dataset(data_length,subset_split_seed=seed, scenarios=scenarios, mode='test', load_scenario_map=load_scenario_map, zero_based_position=zero_based_position)
     test_loader = ScenarioBatchDataLoader(
-        test_dataset, batch_size=batch_size, shuffle=0)
+        test_dataset, batch_size=batch_size, shuffle=False)
 
     #scaler = torch.from_numpy(dataset.std_data).to(device).float()
     #mean_scaler = torch.from_numpy(dataset.mean_data).to(device).float()
@@ -280,7 +289,7 @@ def get_dataloader(data_length, seed, scenarios=None,batch_size=8, load_scenario
 def get_unit_test_dataloader(data_length, seed, scenarios=None,batch_size=8, load_scenario_map=False, zero_based_position=False):
     dataset = Simulation_Dataset(data_length, subset_split_seed=seed, scenarios=scenarios, mode='unit_test', load_scenario_map=load_scenario_map, zero_based_position=zero_based_position)
     dataloader = ScenarioBatchDataLoader(
-        dataset, batch_size=batch_size, shuffle=1)
+        dataset, batch_size=batch_size, shuffle=True)
     return dataloader
 
 class ScenarioBatchDataLoader(DataLoader):
