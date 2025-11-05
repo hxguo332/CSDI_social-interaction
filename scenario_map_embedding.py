@@ -3,20 +3,55 @@ import torch.nn as nn
 import torchvision.models as models
 from torchvision.models import ResNet18_Weights
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+
+class GlobalHead(nn.Module):
+    def __init__(self, in_ch, out_dim, pool="gem"):
+        super().__init__()
+        self.pool = pool
+        self.p = nn.Parameter(torch.ones(1)*3)  # for GeM; init ~3 works well
+        self.proj = nn.Sequential(
+            nn.Conv2d(in_ch, out_dim, 1, bias=False),
+            nn.BatchNorm2d(out_dim),
+            nn.SiLU(),
+        )
+        self.fc = nn.Linear(out_dim, out_dim)
+
+    def gem(self, x, eps=1e-6):
+        x = torch.clamp(x, min=eps).pow(self.p)
+        x = F.adaptive_avg_pool2d(x, 1).pow(1.0/self.p)
+        return x
+
+    def forward(self, feat):              # feat: [B, C, H, W]
+        f = self.proj(feat)               # [B, D, H, W]
+        if self.pool == "gem":
+            g = self.gem(f)               # [B, D, 1, 1]
+        elif self.pool == "avg":
+            g = F.adaptive_avg_pool2d(f, 1)
+        elif self.pool == "max":
+            g = F.adaptive_max_pool2d(f, 1)
+        g = g.flatten(1)                  # [B, D]
+        g = self.fc(g)                    # [B, D] (final global embedding)
+        g = F.normalize(g, dim=-1)        # optional: unit-norm
+        return g
+
 class ResnetMapEncoder(nn.Module):
     def __init__(
         self,
         output_dim=256,
         weights: ResNet18_Weights | None = ResNet18_Weights.DEFAULT,
-        grid_size: int | tuple[int, int] = 7,
+        #grid_size: int | tuple[int, int] = 7,
         finetune_from: str | None = "layer4",
+        pool: str = "gem", # "gem", "avg", "max"
     ):
         super(ResnetMapEncoder, self).__init__()
-        # Normalize grid_size to tuple
-        if isinstance(grid_size, int):
-            grid_h, grid_w = grid_size, grid_size
-        else:
-            grid_h, grid_w = grid_size
+        ## Normalize grid_size to tuple
+        #if isinstance(grid_size, int):
+        #    grid_h, grid_w = grid_size, grid_size
+        #else:
+        #    grid_h, grid_w = grid_size
 
         # Load ResNet-18 with explicit weights enum (pretrained deprecates)
         resnet = models.resnet18(weights=weights)
@@ -61,16 +96,19 @@ class ResnetMapEncoder(nn.Module):
         # Keep only convolutional trunk (no avgpool/fc)
         self.backbone = nn.Sequential(*list(resnet.children())[:-2])
 
-        # Adaptive pooling to a fixed grid to retain spatial layout
-        self.adaptive_pool = nn.AdaptiveAvgPool2d((grid_h, grid_w))
-        self._feat_dim = 512 * grid_h * grid_w
-        self.fc = nn.Linear(self._feat_dim, output_dim)
+        self.head = GlobalHead(in_ch=512, out_dim=output_dim, pool=pool)
+
+        ## Adaptive pooling to a fixed grid to retain spatial layout
+        #self.adaptive_pool = nn.AdaptiveAvgPool2d((grid_h, grid_w))
+        #self._feat_dim = 512 * grid_h * grid_w
+        #self.fc = nn.Linear(self._feat_dim, output_dim)
 
     def forward(self, x):
         x = self.backbone(x)
-        x = self.adaptive_pool(x)
-        x = torch.flatten(x, 1)  # safe for non-contiguous tensors
-        x = self.fc(x)
+        x = self.head(x)
+        #x = self.adaptive_pool(x)
+        #x = torch.flatten(x, 1)  # safe for non-contiguous tensors
+        #x = self.fc(x)
         return x
 
     def train(self, mode: bool = True):
@@ -82,7 +120,7 @@ class ResnetMapEncoder(nn.Module):
 
 if __name__ =="__main__":
     # Instantiate model
-    map_encoder = ResnetMapEncoder(output_dim=256, weights=ResNet18_Weights.DEFAULT, grid_size=7, finetune_from="layer4")
+    map_encoder = ResnetMapEncoder(output_dim=256, weights=ResNet18_Weights.DEFAULT, finetune_from="layer4")
 
     # Test with a random input (1 grayscale map of size 500x2000)
     sample_input = torch.randn(2, 3, 500, 2000)  # (batch, channels, height, width)

@@ -497,11 +497,11 @@ class CSDI_SimulationScenmap(CSDI_base):
 
         # use CNN to embed the scenario map
         me_cfg = (config.get("model", {}).get("map_encoder", {}) if isinstance(config.get("model", {}), dict) else {})
-        grid_size = me_cfg.get("grid_size", 7)
+        #grid_size = me_cfg.get("grid_size", 7)
         finetune_from = me_cfg.get("finetune_from", "layer4")
         self.emb_scenmap = ResnetMapEncoder(
             output_dim=self.emb_scenmap_dim,
-            grid_size=grid_size,
+            #grid_size=grid_size,
             finetune_from=finetune_from,
         )
 
