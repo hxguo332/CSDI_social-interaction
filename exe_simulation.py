@@ -66,6 +66,6 @@ evaluate(
     nsample=args.nsample,
     scaler=1,
     foldername=foldername,
-    return_scen_map=True,
+    eval_collision=True,
     mode="normalized",
 )

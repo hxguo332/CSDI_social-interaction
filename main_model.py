@@ -3,6 +3,7 @@ import torch
 import torch.nn as nn
 from diff_models import diff_CSDI
 from scenario_map_embedding import ResnetMapEncoder
+from collision_loss import compute_collision_loss
 
 
 class CSDI_base(nn.Module):
@@ -15,6 +16,7 @@ class CSDI_base(nn.Module):
         self.emb_feature_dim = config["model"]["featureemb"]
         self.is_unconditional = config["model"]["is_unconditional"]
         self.target_strategy = config["model"]["target_strategy"]
+        self.add_collision_loss = config["model"].get("add_collision_loss", False)
 
         self.emb_total_dim = self.emb_time_dim + self.emb_feature_dim
         if self.is_unconditional == False:
@@ -158,8 +160,134 @@ class CSDI_base(nn.Module):
             raise ValueError("residual contains NaN or Inf")
         if num_eval == 0:
             raise ValueError("No valid target points to evaluate (num_eval=0). Check target_mask logic.")
-        loss = (residual ** 2).sum() / num_eval
+        noise_loss = (residual ** 2).sum() / num_eval
+
+        if self.add_collision_loss:
+            # 1) Reconstruct the denoised trajectory x0_hat
+            x0_hat = self.estimate_x0_from_xt(noisy_data, predicted, current_alpha) * target_mask # (B,K,L)
+            print("target_mask shape:", target_mask.shape)
+            print("x0_hat shape:", x0_hat.shape)
+            print("x0_hat stats - min:", x0_hat.min().item(), "max:", x0_hat.max().item(), "std:", x0_hat.std().item())
+            print("predicted stats - min:", predicted.min().item(), "max:", predicted.max().item(), "std:", predicted.std().item())
+            print("current_alpha stats - min:", current_alpha.min().item(), "max:", current_alpha.max().item(), "std:", current_alpha.std().item())
+            print("noisy_data stats - min:", noisy_data.min().item(), "max:", noisy_data.max().item(), "std:", noisy_data.std().item())
+            idx_x = 0  # assuming x coordinate is at index 0
+            idx_y = 1  # assuming y coordinate is at index 1
+
+            # 2) Extract the (x, y) coordinates only
+            xy = torch.stack([x0_hat[:, idx_x, :], x0_hat[:, idx_y, :]], dim=-1)  # [B,L,2]
+
+            # 3) Create a mask for missing (imputed) time steps
+            ta_time_mask = (target_mask.max(dim=1).values > 0).float()  # [B,L]
+
+            # 4) Compute the collision loss
+            collision_loss = compute_collision_loss(
+                xy, ta_time_mask, self.sdf_fn,
+                w_obs=0.5, w_clear=0.1, margin=0.2, reduction="mean"
+            )
+
+            # Combine with your main noise-prediction loss
+            loss = noise_loss + collision_loss["loss"]
+        else:
+            loss = noise_loss
         return loss
+
+    def calc_loss_debug(
+        self, observed_data, cond_mask, observed_mask, side_info, is_train, set_t=-1, scenario_map_raw=None
+    ):
+        B, K, L = observed_data.shape
+        if is_train != 1:  # for validation
+            t = (torch.ones(B) * set_t).long().to(self.device)
+        else:
+            t = torch.randint(0, self.num_steps, [B]).to(self.device)
+        current_alpha = self.alpha_torch[t]  # (B,1,1)
+        noise = torch.randn_like(observed_data)
+        noisy_data = (current_alpha ** 0.5) * observed_data + (1.0 - current_alpha) ** 0.5 * noise
+
+        total_input = self.set_input_to_diffmodel(noisy_data, observed_data, cond_mask)
+
+        #predicted = self.diffmodel(total_input, side_info, t)  # (B,K,L)
+        try:
+            predicted = self.diffmodel(total_input, side_info, t)  # (B,K,L)
+        except Exception as e:
+            print("⚠️ Exception during self.diffmodel call:", e)
+
+        target_mask = observed_mask - cond_mask
+        residual = (noise - predicted) * target_mask
+        num_eval = target_mask.sum()
+        # Insert runtime checks for NaN, Inf, and zero-sized evaluation mask:
+        if torch.isnan(predicted).any() or torch.isinf(predicted).any():
+            raise ValueError("predicted contains NaN or Inf")
+        if torch.isnan(residual).any() or torch.isinf(residual).any():
+            raise ValueError("residual contains NaN or Inf")
+        if num_eval == 0:
+            raise ValueError("No valid target points to evaluate (num_eval=0). Check target_mask logic.")
+        noise_loss = (residual ** 2).sum() / num_eval
+
+        if self.add_collision_loss:
+            print(f"t is {t}")
+            # 1) Reconstruct the denoised trajectory x0_hat
+            x0_hat = self.estimate_x0_from_xt(noisy_data, predicted, current_alpha) * target_mask # (B,K,L)
+            print("target_mask shape:", target_mask.shape)
+            print("x0_hat shape:", x0_hat.shape)
+            print("x0_hat stats - min:", x0_hat.min().item(), "max:", x0_hat.max().item(), "std:", x0_hat.std().item())
+            print("predicted stats - min:", predicted.min().item(), "max:", predicted.max().item(), "std:", predicted.std().item())
+            print("current_alpha stats - min:", current_alpha.min().item(), "max:", current_alpha.max().item(), "std:", current_alpha.std().item())
+            print("noisy_data stats - min:", noisy_data.min().item(), "max:", noisy_data.max().item(), "std:", noisy_data.std().item())
+            idx_x = 0  # assuming x coordinate is at index 0
+            idx_y = 1  # assuming y coordinate is at index 1
+
+            # 2) Extract the (x, y) coordinates only
+            xy = torch.stack([x0_hat[:, idx_x, :], x0_hat[:, idx_y, :]], dim=-1)  # [B,L,2]
+
+            # 3) Create a mask for missing (imputed) time steps
+            ta_time_mask = (target_mask.max(dim=1).values > 0).float()  # [B,L]
+
+            # 4) Compute the collision loss
+            collision_loss = compute_collision_loss(
+                xy, ta_time_mask, self.gen_raster_sdf_fn(scenario_map_raw),
+                w_obs=0.5, w_clear=0.1, margin=0.2, reduction="mean"
+            )
+            return xy, ta_time_mask, target_mask
+
+            # Combine with your main noise-prediction loss
+            loss = noise_loss + collision_loss["loss"]
+        else:
+            loss = noise_loss
+        return loss
+
+    def gen_raster_sdf_fn(self, scenario_map_raw):
+        """
+         scenario_map_raw: (B, H, W, 3) tensor representing the raw scenario map, The first two channels are obstacle info.
+        returns: sdf_fn(points) function that computes SDF values at given points"""
+        W, H = scenario_map_raw.shape[1], scenario_map_raw.shape[2]
+        def sdf_fn(points):
+            """
+            points: (B, L, 2) tensor representing (x, y) coordinates
+            returns: (B, L) tensor representing SDF values at the given points
+            """
+            B, L, _ = points.shape
+            points_pixel = points.clone()
+            points[..., 0] = points[..., 0] * W  # convert to pixel coordinates
+            points[..., 1] = points[..., 1] * H
+            # Placeholder implementation; replace with actual SDF computation
+
+            sdf_values = torch.ones(B, L).to(points.device)  # Dummy values
+
+            # based on the scenario_map_raw to compute the SDF values at the given points.
+
+            return sdf_values
+        return sdf_fn
+
+    def sdf_fn(self, points):
+        """
+        points: (B, L, 2) tensor representing (x, y) coordinates
+        returns: (B, L) tensor representing SDF values at the given points
+        """
+        # Placeholder implementation; replace with actual SDF computation
+        B, L, _ = points.shape
+        sdf_values = torch.ones(B, L).to(points.device)  # Dummy values
+        return sdf_values
 
     def set_input_to_diffmodel(self, noisy_data, observed_data, cond_mask):
         if self.is_unconditional == True:
@@ -261,6 +389,19 @@ class CSDI_base(nn.Module):
     def process_data(self, batch):
         raise NotImplementedError("This method should be overridden by subclasses.")
 
+    def estimate_x0_from_xt(self, x_t, eps_pred, alpha_t_scalar_or_tensor):
+        """
+        x_t, eps_pred: (B, K, L)
+        alpha_t_scalar_or_tensor: 标量 or (B,1,1), that represent alpha_t
+        return: x0_hat (B, K, L)
+        """
+        if not torch.is_tensor(alpha_t_scalar_or_tensor):
+            alpha_t = torch.tensor(alpha_t_scalar_or_tensor, device=x_t.device, dtype=x_t.dtype)
+            alpha_t = alpha_t.view(1,1,1)
+        else:
+            alpha_t = alpha_t_scalar_or_tensor
+        return (x_t - (1.0 - alpha_t).sqrt() * eps_pred) / alpha_t.sqrt()
+
 
 class CSDI_PM25(CSDI_base):
     def __init__(self, config, device, target_dim=36):
@@ -318,6 +459,39 @@ class CSDI_Physio(CSDI_base):
 class CSDI_Simulation(CSDI_base):
     def __init__(self, config, device, target_dim=2):
         super(CSDI_Simulation, self).__init__(target_dim, config, device)
+
+    def forward(self, batch, is_train=1):
+        (
+            observed_data,
+            observed_mask,
+            observed_tp,
+            gt_mask,
+            for_pattern_mask,
+            _,
+        ) = self.process_data(batch)
+        if is_train == 0:
+            cond_mask = gt_mask
+        elif self.target_strategy == "two_ends":
+            cond_mask = gt_mask
+        elif self.target_strategy == "mix_two_ends":
+            if np.random.rand() > 0.8:
+                cond_mask = gt_mask
+            else:
+                cond_mask = self.get_randmask(observed_mask)
+        elif self.target_strategy == "hist" or self.target_strategy == "mix":
+            cond_mask = self.get_hist_mask(
+                observed_mask, for_pattern_mask=for_pattern_mask
+            )
+        elif self.target_strategy == "random":
+            cond_mask = self.get_randmask(observed_mask)
+        else:
+            raise NotImplementedError(f"Target strategy {self.target_strategy} not implemented.")
+
+        side_info = self.get_side_info(observed_tp, cond_mask)
+
+        loss_func = self.calc_loss if is_train == 1 else self.calc_loss_valid
+
+        return loss_func(observed_data, cond_mask, observed_mask, side_info, is_train)
 
     def process_data(self, batch):
         observed_data = batch["observed_data"].to(self.device).float()
@@ -482,6 +656,7 @@ class CSDI_SimulationScenmap(CSDI_base):
         self.target_strategy = config["model"]["target_strategy"]
         # init the scenario map embedding layer
         self.emb_scenmap_dim = config["model"]["scenmapemb"]
+        self.add_collision_loss = config["model"].get("add_collision_loss", False)
 
         # use MLP to embed the scale
         self.scale_dim = 2 # scale of the scenario map, x direction and y direction
@@ -497,11 +672,11 @@ class CSDI_SimulationScenmap(CSDI_base):
 
         # use CNN to embed the scenario map
         me_cfg = (config.get("model", {}).get("map_encoder", {}) if isinstance(config.get("model", {}), dict) else {})
-        #grid_size = me_cfg.get("grid_size", 7)
+        grid_size = me_cfg.get("grid_size", 7)
         finetune_from = me_cfg.get("finetune_from", "layer4")
         self.emb_scenmap = ResnetMapEncoder(
             output_dim=self.emb_scenmap_dim,
-            #grid_size=grid_size,
+            grid_size=grid_size,
             finetune_from=finetune_from,
         )
 
@@ -578,18 +753,53 @@ class CSDI_SimulationScenmap(CSDI_base):
         ) = self.process_data(batch)
         if is_train == 0:
             cond_mask = gt_mask
-        elif self.target_strategy != "random":
+        elif self.target_strategy == "two_ends":
+            cond_mask = gt_mask
+        elif self.target_strategy == "mix_two_ends":
+            if np.random.rand() > 0.8:
+                cond_mask = gt_mask
+            else:
+                cond_mask = self.get_randmask(observed_mask)
+        elif self.target_strategy == "hist" or self.target_strategy == "mix":
             cond_mask = self.get_hist_mask(
                 observed_mask, for_pattern_mask=for_pattern_mask
             )
-        else:
+        elif self.target_strategy == "random":
             cond_mask = self.get_randmask(observed_mask)
+        else:
+            raise NotImplementedError(f"Target strategy {self.target_strategy} not implemented.")
 
         side_info = self.get_side_info(observed_tp, cond_mask, scenmap, scenmap_scales)
 
         loss_func = self.calc_loss if is_train == 1 else self.calc_loss_valid
 
         return loss_func(observed_data, cond_mask, observed_mask, side_info, is_train)
+
+    def debug_loss(self, batch):
+        (
+            observed_data,
+            observed_mask,
+            observed_tp,
+            gt_mask,
+            for_pattern_mask,
+            _,
+            scenmap,
+            scenmap_scales,
+        ) = self.process_data(batch)
+
+        scenmap_raw = batch["scen_map_raw"]
+
+        #cond_mask = self.get_hist_mask(
+        #    observed_mask, for_pattern_mask=for_pattern_mask
+        #)
+        cond_mask = gt_mask
+
+        side_info = self.get_side_info(observed_tp, cond_mask, scenmap, scenmap_scales)
+
+        loss = self.calc_loss_debug(
+            observed_data, cond_mask, observed_mask, side_info, is_train=1
+        )
+        return loss, observed_data, observed_mask, cond_mask, scenmap_raw
 
     def evaluate(self, batch, n_samples, mode="normalized"):
         (

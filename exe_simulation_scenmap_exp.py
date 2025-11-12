@@ -92,6 +92,7 @@ if __name__ == "__main__":
 
     # Common dataloader kwargs
     scenarios = None if config.get("dataset", {}).get("scenarios") in (None, "null") else config["dataset"]["scenarios"]
+    dataset_cfg = config.get("dataset", {})
     common_loader_kwargs = dict(
         scenarios=scenarios,
         data_length=args.data_length,
@@ -100,6 +101,8 @@ if __name__ == "__main__":
         zero_based_position=True,
         load_scenario_map=True,
         debug=False,
+        scen_map_variant=dataset_cfg.get("scen_map_variant", "default"),
+        poi_radius=dataset_cfg.get("poi_radius", 5),
     )
 
     # Train loader

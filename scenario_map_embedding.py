@@ -8,8 +8,13 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class GlobalHead(nn.Module):
-    def __init__(self, in_ch, out_dim, pool="gem"):
+    def __init__(self, in_ch, out_dim, pool="gem", grid_size: int | tuple[int, int] = 7):
         super().__init__()
+        if isinstance(grid_size, int):
+            grid_h, grid_w = grid_size, grid_size
+        else:
+            grid_h, grid_w = grid_size
+        self.grid_size = (grid_h, grid_w)
         self.pool = pool
         self.p = nn.Parameter(torch.ones(1)*3)  # for GeM; init ~3 works well
         self.proj = nn.Sequential(
@@ -17,11 +22,11 @@ class GlobalHead(nn.Module):
             nn.BatchNorm2d(out_dim),
             nn.SiLU(),
         )
-        self.fc = nn.Linear(out_dim, out_dim)
+        self.fc = nn.Linear(out_dim*grid_h*grid_w, out_dim)
 
     def gem(self, x, eps=1e-6):
         x = torch.clamp(x, min=eps).pow(self.p)
-        x = F.adaptive_avg_pool2d(x, 1).pow(1.0/self.p)
+        x = F.adaptive_avg_pool2d(x, self.grid_size).pow(1.0/self.p)
         return x
 
     def forward(self, feat):              # feat: [B, C, H, W]
@@ -29,10 +34,10 @@ class GlobalHead(nn.Module):
         if self.pool == "gem":
             g = self.gem(f)               # [B, D, 1, 1]
         elif self.pool == "avg":
-            g = F.adaptive_avg_pool2d(f, 1)
+            g = F.adaptive_avg_pool2d(f, self.grid_size)
         elif self.pool == "max":
-            g = F.adaptive_max_pool2d(f, 1)
-        g = g.flatten(1)                  # [B, D]
+            g = F.adaptive_max_pool2d(f, self.grid_size)
+        g = g.flatten(1)                  # [B, D * grid_h * grid_w]
         g = self.fc(g)                    # [B, D] (final global embedding)
         g = F.normalize(g, dim=-1)        # optional: unit-norm
         return g
@@ -42,7 +47,7 @@ class ResnetMapEncoder(nn.Module):
         self,
         output_dim=256,
         weights: ResNet18_Weights | None = ResNet18_Weights.DEFAULT,
-        #grid_size: int | tuple[int, int] = 7,
+        grid_size: int | tuple[int, int] = 7,
         finetune_from: str | None = "layer4",
         pool: str = "gem", # "gem", "avg", "max"
     ):
@@ -96,7 +101,7 @@ class ResnetMapEncoder(nn.Module):
         # Keep only convolutional trunk (no avgpool/fc)
         self.backbone = nn.Sequential(*list(resnet.children())[:-2])
 
-        self.head = GlobalHead(in_ch=512, out_dim=output_dim, pool=pool)
+        self.head = GlobalHead(in_ch=512, out_dim=output_dim, pool=pool, grid_size=grid_size)
 
         ## Adaptive pooling to a fixed grid to retain spatial layout
         #self.adaptive_pool = nn.AdaptiveAvgPool2d((grid_h, grid_w))

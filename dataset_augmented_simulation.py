@@ -32,6 +32,8 @@ class AugmentedSimulationDataset(Simulation_Dataset):
         resize_to=(128, 128),
         debug=False,
         preprocess_for_resnet=False,
+        scen_map_variant: str = "default",  # "default" or "merged_last_empty_with_poi"
+        poi_radius: int = 5,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -40,6 +42,9 @@ class AugmentedSimulationDataset(Simulation_Dataset):
         self.debug = debug
         # If True, convert scen_map to RGB float in [0,1] and normalize with ImageNet stats
         self.preprocess_for_resnet = preprocess_for_resnet
+        # Variant of scen_map fed to model (raw stays unchanged for evaluation)
+        self.scen_map_variant = scen_map_variant
+        self.poi_radius = int(poi_radius)
         if not self.load_scenario_map:
             raise ValueError("AugmentedSimulationDataset requires load_scenario_map=True")
         # Cache ImageNet mean/std from torchvision weights if available
@@ -140,19 +145,36 @@ class AugmentedSimulationDataset(Simulation_Dataset):
         map_size = np.array([map_width, map_height], dtype=np.float32)
         adjusted_values = adjusted_values / map_size  # shape (T, 2)
 
+
         # Optional: preprocess scenario map for torchvision ResNet
         # Expected by pretrained ResNet: RGB, float32 in [0,1], then ImageNet mean/std normalization
+        # Apply alternative scenemap variant if requested (on processed map only)
+        # Keep scen_map_raw unchanged for evaluation.
+        adjusted_values_px = None
+        if self.scen_map_variant and self.scen_map_variant != "default":
+            # Merge channels 0 and 1 into channel 0; move entrances (2) to channel 1; clear channel 2
+            base = scen_map_processed
+            merged = np.maximum(base[:, :, 0], base[:, :, 1])
+            variant = np.zeros_like(base)
+            variant[:, :, 0] = merged
+            variant[:, :, 1] = base[:, :, 2]
+            # Draw start/end markers as Gaussians on channel 2
+            # Map normalized coords back to pixel coords if needed
+            # At this point adjusted_values may have been normalized already (see above).
+            # Recover pixel coords using the current map size.
+            adjusted_values_px = adjusted_values * np.array([map_width, map_height], dtype=np.float32)
+            self._draw_start_end_gaussians(variant, adjusted_values_px, observed_masks, self.poi_radius)
+            scen_map_processed = variant
+
         if self.preprocess_for_resnet:
             # Keep a raw copy (BGR uint8/float in [0,255]) for evaluation/collision metrics
-            scen_map_raw = scen_map_processed.copy()
+            scen_map_raw = scen_map_processed.copy() if self.scen_map_variant == "default" else base.copy()
             img = scen_map_processed
             # Ensure float32 and [0,1]
             if img.dtype != np.float32:
                 img = img.astype(np.float32)
             if img.max() > 1.0:
                 img = img / 255.0
-            # Scenario map is already RGB image, no need to Convert BGR (OpenCV) -> RGB
-            # img = img[:, :, ::-1]
             # ImageNet normalization
             img = (img - self._imnet_mean) / self._imnet_std
             scen_map_processed = img
@@ -171,6 +193,67 @@ class AugmentedSimulationDataset(Simulation_Dataset):
             # Provide raw RGB map for downstream evaluation (collision metrics)
             s['scen_map_raw'] = scen_map_raw
         return s
+
+    def _draw_start_end_gaussians(self, img: np.ndarray, track_px: np.ndarray, masks: np.ndarray, radius: int = 5):
+        """
+        Draw two Gaussian blobs (start and end positions) onto channel 2 of img.
+        - img: HxWx3 uint8
+        - track_px: Tx2 float pixel coordinates aligned with img
+        - masks: Tx2 boolean masks; True where observed
+        - radius: Gaussian radius in pixels
+        """
+        H, W = img.shape[:2]
+        if track_px is None or len(track_px) == 0:
+            return
+        # Determine first/last valid indices
+        valid = np.any(masks, axis=1)
+        if not np.any(valid):
+            # Fallback to endpoints
+            idx_start, idx_end = 0, len(track_px) - 1
+        else:
+            idxs = np.where(valid)[0]
+            idx_start, idx_end = int(idxs[0]), int(idxs[-1])
+
+        centers = [track_px[idx_start], track_px[idx_end]]
+
+        # Precompute Gaussian kernel (normalized to 255)
+        R = max(1, int(radius))
+        size = 2 * R + 1
+        yy, xx = np.ogrid[-R:R+1, -R:R+1]
+        sigma = max(1e-6, R / 2.0)
+        kernel = np.exp(-(xx*xx + yy*yy) / (2 * sigma * sigma))
+        kernel = (kernel / kernel.max()) * 255.0
+        kernel = kernel.astype(np.uint8)
+
+        ch = img[:, :, 2]
+        for c in centers:
+            x, y = int(round(c[0])), int(round(c[1]))
+            if x < 0 or x >= W or y < 0 or y >= H:
+                continue
+            x0, y0 = x - R, y - R
+            x1, y1 = x + R + 1, y + R + 1
+            kx0, ky0 = 0, 0
+            kx1, ky1 = size, size
+            # Clip to image bounds
+            if x0 < 0:
+                kx0 = -x0
+                x0 = 0
+            if y0 < 0:
+                ky0 = -y0
+                y0 = 0
+            if x1 > W:
+                kx1 -= (x1 - W)
+                x1 = W
+            if y1 > H:
+                ky1 -= (y1 - H)
+                y1 = H
+            if x0 >= x1 or y0 >= y1:
+                continue
+            roi = ch[y0:y1, x0:x1]
+            kroi = kernel[ky0:ky1, kx0:kx1]
+            # Blend by max to preserve bright signal
+            np.maximum(roi, kroi, out=roi)
+        img[:, :, 2] = ch
 
     def crop_map_and_adjust_track(self, scen_map_raw, observed_values, observed_masks, desired_aspect, min_bbox_ratio=0.15):
         H, W, _ = scen_map_raw.shape
@@ -395,6 +478,8 @@ def get_augmented_dataloader_old(
     part="train",
     debug=False,
     preprocess_for_resnet=True,
+    scen_map_variant="default",
+    poi_radius=5,
 ):
     from torch.utils.data import DataLoader
     assert part in ["train", "valid", "test"], "part must be 'train',  'valid' or 'test'"
@@ -408,7 +493,9 @@ def get_augmented_dataloader_old(
             zero_based_position=zero_based_position,
             augmentation_mode=augmentation_mode,
             preprocess_for_resnet=preprocess_for_resnet,
-            debug=debug
+            debug=debug,
+            scen_map_variant=scen_map_variant,
+            poi_radius=poi_radius,
         )
         wrapped_dataset = ResizeWrapperDataset(base_dataset, resize_options, batch_size)
         return DataLoader(wrapped_dataset, batch_size=batch_size, shuffle=(mode == 'train'))
@@ -434,8 +521,10 @@ def get_augmented_dataloader(
     drop_last=True,
     num_workers=8,
     preprocess_for_resnet=True,
+    scen_map_variant="default",
+    poi_radius=5,
 ):
-    assert part in ["train", "valid", "test"]
+    assert part in ["train", "valid", "test", "unit_test"], "part must be 'train', 'valid', 'test' or 'unit_test'"
     base_dataset = AugmentedSimulationDataset(
         data_length=data_length,
         subset_split_seed=seed,
@@ -447,6 +536,8 @@ def get_augmented_dataloader(
         resize_to=resize_options[0],  # 只是默认值；真正按批的来自 sampler
         preprocess_for_resnet=preprocess_for_resnet,
         debug=debug,
+        scen_map_variant=scen_map_variant,
+        poi_radius=poi_radius,
     )
 
     if distributed:
@@ -485,8 +576,10 @@ def get_nonaugmented_dataloader_with_scenario_batches(
     debug=False,
     part="train",
     preprocess_for_resnet=True,
+    scen_map_variant="default",
+    poi_radius=5,
 ):
-    assert part in ["train", "valid", "test"], "part must be 'train',  'valid' or 'test'"
+    assert part in ["train", "valid", "test", "unit_test"], "part must be 'train', 'valid', 'unit_test' or 'test'"
     def build_loader(mode):
         dataset = AugmentedSimulationDataset(
             data_length=data_length,
@@ -498,6 +591,8 @@ def get_nonaugmented_dataloader_with_scenario_batches(
             augmentation_mode=None,  # No augmentation applied
             preprocess_for_resnet=preprocess_for_resnet,
             debug=debug,
+            scen_map_variant=scen_map_variant,
+            poi_radius=poi_radius,
         )
         return ScenarioBatchDataLoader(dataset, batch_size=batch_size, shuffle=(mode == 'train'))
     return build_loader(part)

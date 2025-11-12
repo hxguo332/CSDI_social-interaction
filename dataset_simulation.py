@@ -129,7 +129,7 @@ class Simulation_Dataset(Dataset):
             # for unit test, we use the first 50 samples
             return data[:20]
         else:
-            raise ValueError(f"Mode {self.mode} is not available. Choose from ['train', 'valid', 'test']")
+            raise ValueError(f"Mode {self.mode} is not available. Choose from ['train', 'valid', 'test', 'unit_test']")
 
     def _split_data(self, sim_info, desired_length):
         """
