@@ -7,6 +7,7 @@ from torch.utils.data import Sampler
 import random
 from dataset_simulation import Simulation_Dataset
 from dataset_simulation import ScenarioBatchDataLoader
+from sdf import generate_sdf
 import cv2
 import numpy as np
 from dataclasses import dataclass
@@ -34,6 +35,7 @@ class AugmentedSimulationDataset(Simulation_Dataset):
         preprocess_for_resnet=False,
         scen_map_variant: str = "default",  # "default" or "merged_last_empty_with_poi"
         poi_radius: int = 5,
+        gen_sdf: bool = False,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -45,6 +47,12 @@ class AugmentedSimulationDataset(Simulation_Dataset):
         # Variant of scen_map fed to model (raw stays unchanged for evaluation)
         self.scen_map_variant = scen_map_variant
         self.poi_radius = int(poi_radius)
+        self.gen_sdf = gen_sdf
+        if gen_sdf:
+            self.sdf_maps = {}
+            for scenario, scen_map in self.scen_map.items():
+                sdf = generate_sdf(scen_map)
+                self.sdf_maps[scenario] = sdf
         if not self.load_scenario_map:
             raise ValueError("AugmentedSimulationDataset requires load_scenario_map=True")
         # Cache ImageNet mean/std from torchvision weights if available
@@ -134,6 +142,8 @@ class AugmentedSimulationDataset(Simulation_Dataset):
             adjusted_values = self.convert_to_track_coordinates(observed_values, scen_map_raw.shape[0])
             scen_map_processed = scen_map_raw
             resize_shape = (-1, -1) # Indicate no resizing applied
+            if self.gen_sdf:
+                sdf = self.sdf_maps[scenario]
         
         # Convert pixels-per-world (ppw) to world-per-pixel (wpp) per-axis for downstream use
         # Guard against division by zero
@@ -189,6 +199,8 @@ class AugmentedSimulationDataset(Simulation_Dataset):
             'scen_map_scale': wpp.astype(np.float32),
             'resize_shape': resize_shape
         }
+        if self.gen_sdf:
+            s["sdf"] = sdf
         if self.preprocess_for_resnet:
             # Provide raw RGB map for downstream evaluation (collision metrics)
             s['scen_map_raw'] = scen_map_raw
@@ -523,6 +535,7 @@ def get_augmented_dataloader(
     preprocess_for_resnet=True,
     scen_map_variant="default",
     poi_radius=5,
+    gen_sdf: bool = False,
 ):
     assert part in ["train", "valid", "test", "unit_test"], "part must be 'train', 'valid', 'test' or 'unit_test'"
     base_dataset = AugmentedSimulationDataset(
@@ -538,6 +551,7 @@ def get_augmented_dataloader(
         debug=debug,
         scen_map_variant=scen_map_variant,
         poi_radius=poi_radius,
+        gen_sdf=gen_sdf,
     )
 
     if distributed:
@@ -578,6 +592,7 @@ def get_nonaugmented_dataloader_with_scenario_batches(
     preprocess_for_resnet=True,
     scen_map_variant="default",
     poi_radius=5,
+    gen_sdf: bool = False,
 ):
     assert part in ["train", "valid", "test", "unit_test"], "part must be 'train', 'valid', 'unit_test' or 'test'"
     def build_loader(mode):
@@ -593,6 +608,7 @@ def get_nonaugmented_dataloader_with_scenario_batches(
             debug=debug,
             scen_map_variant=scen_map_variant,
             poi_radius=poi_radius,
+            gen_sdf=gen_sdf,
         )
         return ScenarioBatchDataLoader(dataset, batch_size=batch_size, shuffle=(mode == 'train'))
     return build_loader(part)
@@ -632,31 +648,3 @@ class BatchParamSampler(Sampler):
     def __len__(self):
         n = len(self.base_sampler)
         return (n // self.batch_size) if self.drop_last else math.ceil(n / self.batch_size)
-
-from torch.utils.data._utils.collate import default_collate
-import numpy as np
-import torch
-
-def debug_collate(batch):
-    print("---- DEBUG COLLATE ----")
-    for k in batch[0].keys():
-        types = []
-        shapes = []
-        dtypes = []
-        for i, b in enumerate(batch):
-            v = b[k]
-            if isinstance(v, np.ndarray):
-                types.append("np")
-                shapes.append(v.shape)
-                dtypes.append(v.dtype)
-            elif torch.is_tensor(v):
-                types.append("torch")
-                shapes.append(tuple(v.shape))
-                dtypes.append(v.dtype)
-            else:
-                types.append(type(v).__name__)
-                shapes.append(getattr(v, "shape", None))
-                dtypes.append(getattr(v, "dtype", None))
-        print(f"{k:>16s} | types={set(types)} dtypes={set(map(str,dtypes))} shapes={set(map(str,shapes))}")
-    print("-----------------------")
-    return default_collate(batch)

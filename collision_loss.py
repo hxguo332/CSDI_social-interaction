@@ -70,6 +70,7 @@ def compute_collision_loss(
 
     # Aggregate losses
     if reduction == "mean":
+        #print(f"Denominator for mean reduction: {denom.item()}")
         L_obs = (L_obs_pt * mask).sum() / denom
         L_clear = (L_clear_pt * mask).sum() / denom
         loss = w_obs * L_obs + w_clear * L_clear

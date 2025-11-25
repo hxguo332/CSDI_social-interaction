@@ -103,6 +103,7 @@ if __name__ == "__main__":
         debug=False,
         scen_map_variant=dataset_cfg.get("scen_map_variant", "default"),
         poi_radius=dataset_cfg.get("poi_radius", 5),
+        gen_sdf=config.get("model", {}).get("add_collision_loss", False)
     )
 
     # Train loader

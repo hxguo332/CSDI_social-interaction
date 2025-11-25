@@ -1,6 +1,7 @@
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from diff_models import diff_CSDI
 from scenario_map_embedding import ResnetMapEncoder
 from collision_loss import compute_collision_loss
@@ -108,18 +109,18 @@ class CSDI_base(nn.Module):
         return side_info
 
     def calc_loss_valid(
-        self, observed_data, cond_mask, observed_mask, side_info, is_train
+        self, observed_data, cond_mask, observed_mask, side_info, is_train, sdf=None
     ):
         loss_sum = 0
         for t in range(self.num_steps):  # calculate loss for all t
             loss = self.calc_loss(
-                observed_data, cond_mask, observed_mask, side_info, is_train, set_t=t
+                observed_data, cond_mask, observed_mask, side_info, is_train, set_t=t, sdf=sdf
             )
             loss_sum += loss.detach()
         return loss_sum / self.num_steps
 
     def calc_loss(
-        self, observed_data, cond_mask, observed_mask, side_info, is_train, set_t=-1
+        self, observed_data, cond_mask, observed_mask, side_info, is_train, set_t=-1, sdf=None
     ):
         B, K, L = observed_data.shape
         if is_train != 1:  # for validation
@@ -165,12 +166,12 @@ class CSDI_base(nn.Module):
         if self.add_collision_loss:
             # 1) Reconstruct the denoised trajectory x0_hat
             x0_hat = self.estimate_x0_from_xt(noisy_data, predicted, current_alpha) * target_mask # (B,K,L)
-            print("target_mask shape:", target_mask.shape)
-            print("x0_hat shape:", x0_hat.shape)
-            print("x0_hat stats - min:", x0_hat.min().item(), "max:", x0_hat.max().item(), "std:", x0_hat.std().item())
-            print("predicted stats - min:", predicted.min().item(), "max:", predicted.max().item(), "std:", predicted.std().item())
-            print("current_alpha stats - min:", current_alpha.min().item(), "max:", current_alpha.max().item(), "std:", current_alpha.std().item())
-            print("noisy_data stats - min:", noisy_data.min().item(), "max:", noisy_data.max().item(), "std:", noisy_data.std().item())
+            #print("target_mask shape:", target_mask.shape)
+            #print("x0_hat shape:", x0_hat.shape)
+            #print("x0_hat stats - min:", x0_hat.min().item(), "max:", x0_hat.max().item(), "std:", x0_hat.std().item())
+            #print("predicted stats - min:", predicted.min().item(), "max:", predicted.max().item(), "std:", predicted.std().item())
+            #print("current_alpha stats - min:", current_alpha.min().item(), "max:", current_alpha.max().item(), "std:", current_alpha.std().item())
+            #print("noisy_data stats - min:", noisy_data.min().item(), "max:", noisy_data.max().item(), "std:", noisy_data.std().item())
             idx_x = 0  # assuming x coordinate is at index 0
             idx_y = 1  # assuming y coordinate is at index 1
 
@@ -182,18 +183,19 @@ class CSDI_base(nn.Module):
 
             # 4) Compute the collision loss
             collision_loss = compute_collision_loss(
-                xy, ta_time_mask, self.sdf_fn,
-                w_obs=0.5, w_clear=0.1, margin=0.2, reduction="mean"
+                xy, ta_time_mask, self.gen_raster_sdf_fn(sdf),
+                w_obs=1, w_clear=0, margin=0, reduction="mean"
             )
 
+            collision_loss_weight = 10.0  # You can adjust this weight as needed
             # Combine with your main noise-prediction loss
-            loss = noise_loss + collision_loss["loss"]
+            loss = noise_loss + collision_loss["loss"] * collision_loss_weight
         else:
             loss = noise_loss
         return loss
 
     def calc_loss_debug(
-        self, observed_data, cond_mask, observed_mask, side_info, is_train, set_t=-1, scenario_map_raw=None
+        self, observed_data, cond_mask, observed_mask, side_info, is_train, set_t=-1, scenario_map_raw=None, sdf=None
     ):
         B, K, L = observed_data.shape
         if is_train != 1:  # for validation
@@ -245,9 +247,11 @@ class CSDI_base(nn.Module):
 
             # 4) Compute the collision loss
             collision_loss = compute_collision_loss(
-                xy, ta_time_mask, self.gen_raster_sdf_fn(scenario_map_raw),
-                w_obs=0.5, w_clear=0.1, margin=0.2, reduction="mean"
+                xy, ta_time_mask, self.gen_raster_sdf_fn(sdf),
+                w_obs=1, w_clear=0.0, margin=0, reduction="mean"
             )
+            print("Collision loss components:", collision_loss)
+            print(f"Noise loss: {noise_loss.item()}, Collision loss: {collision_loss['loss'].item()}")
             return xy, ta_time_mask, target_mask
 
             # Combine with your main noise-prediction loss
@@ -256,27 +260,60 @@ class CSDI_base(nn.Module):
             loss = noise_loss
         return loss
 
-    def gen_raster_sdf_fn(self, scenario_map_raw):
+    def gen_raster_sdf_fn(
+            self, 
+            sdf, 
+            align_corners: bool = True,
+            padding_mode: str = "border",):
         """
-         scenario_map_raw: (B, H, W, 3) tensor representing the raw scenario map, The first two channels are obstacle info.
+        Parameters
+            sdf: (B, W, H), signed distance function
         returns: sdf_fn(points) function that computes SDF values at given points"""
-        W, H = scenario_map_raw.shape[1], scenario_map_raw.shape[2]
+        B, H, W = sdf.shape
+        sdf = sdf.unsqueeze(1)  # (B, 1, H, W)
+        #print("SDF stats - min:", sdf.min().item(), "max:", sdf.max().item(), "std:", sdf.std().item())
         def sdf_fn(points):
             """
-            points: (B, L, 2) tensor representing (x, y) coordinates
-            returns: (B, L) tensor representing SDF values at the given points
+            Sample the precomputed SDF at given (normalized) points.
+
+            Parameters
+            ----------
+            points : torch.Tensor, shape (B, L, 2)
+                Normalized coordinates in [0, 1] x [0, 1], (x, y).
+                If your points are already in pixel coordinates, convert them to normalized coords before calling.
+
+            Returns
+            -------
+            torch.Tensor, shape (B, L)
+                Signed distances (positive free, negative obstacle), bilinearly sampled from the raster SDF.
             """
-            B, L, _ = points.shape
-            points_pixel = points.clone()
-            points[..., 0] = points[..., 0] * W  # convert to pixel coordinates
-            points[..., 1] = points[..., 1] * H
-            # Placeholder implementation; replace with actual SDF computation
+            assert points.dim() == 3 and points.shape[-1] == 2, "points should be (B, L, 2)"
+            Bp, Lp, _ = points.shape
+            assert Bp == B, f"Batch size mismatch: points B={Bp}, map B={B}"
 
-            sdf_values = torch.ones(B, L).to(points.device)  # Dummy values
+            # Do NOT modify the input tensor in-place (avoid breaking autograd).
+            # Convert [0,1] -> [-1,1] for grid_sample (x → u, y → v).
+            #print("Points stats before normalization - min:", points.min().item(), "max:", points.max().item(), "std:", points.std().item())
+            u = 2.0 * points[..., 0] - 1.0  # (B, L)
+            v = 2.0 * points[..., 1] - 1.0  # (B, L)
+            #print("u stats - min:", u.min().item(), "max:", u.max().item(), "std:", u.std().item())
+            #print("v stats - min:", v.min().item(), "max:", v.max().item(), "std:", v.std().item())
 
-            # based on the scenario_map_raw to compute the SDF values at the given points.
+            # Build a sampling grid of shape (B, L, 1, 2)
+            grid = torch.stack([u, v], dim=-1).view(B, Lp, 1, 2)
+            grid = grid.to(device=sdf.device, dtype=sdf.dtype)
 
-            return sdf_values
+            # Bilinear sample. We expand batch-wise SDFs to match B if needed (already B here).
+            # align_corners must match the normalization above
+            d = F.grid_sample(
+                sdf, grid,
+                mode="bilinear",
+                padding_mode=padding_mode,
+                align_corners=align_corners,
+            )  # -> (B, 1, L, 1)
+            d = d.view(B, Lp)  # (B, L)
+            return d
+
         return sdf_fn
 
     def sdf_fn(self, points):
@@ -769,11 +806,17 @@ class CSDI_SimulationScenmap(CSDI_base):
         else:
             raise NotImplementedError(f"Target strategy {self.target_strategy} not implemented.")
 
+
         side_info = self.get_side_info(observed_tp, cond_mask, scenmap, scenmap_scales)
+
+        if self.add_collision_loss:
+            sdf = batch["sdf"].to(self.device).float()  # (B, H, W)
+        else:
+            sdf = None
 
         loss_func = self.calc_loss if is_train == 1 else self.calc_loss_valid
 
-        return loss_func(observed_data, cond_mask, observed_mask, side_info, is_train)
+        return loss_func(observed_data, cond_mask, observed_mask, side_info, is_train, sdf=sdf)
 
     def debug_loss(self, batch):
         (
@@ -788,6 +831,8 @@ class CSDI_SimulationScenmap(CSDI_base):
         ) = self.process_data(batch)
 
         scenmap_raw = batch["scen_map_raw"]
+        #sdf = batch["sdf"] # (B, H, W)
+        sdf = batch["sdf"].to(self.device).float()  # (B, H, W)
 
         #cond_mask = self.get_hist_mask(
         #    observed_mask, for_pattern_mask=for_pattern_mask
@@ -797,7 +842,7 @@ class CSDI_SimulationScenmap(CSDI_base):
         side_info = self.get_side_info(observed_tp, cond_mask, scenmap, scenmap_scales)
 
         loss = self.calc_loss_debug(
-            observed_data, cond_mask, observed_mask, side_info, is_train=1
+            observed_data, cond_mask, observed_mask, side_info, is_train=1, sdf=sdf,
         )
         return loss, observed_data, observed_mask, cond_mask, scenmap_raw
 

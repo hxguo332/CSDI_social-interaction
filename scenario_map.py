@@ -96,6 +96,39 @@ def save_map(grid, filename="scenario_map_highres.png"):
     cv2.imwrite(filename, grid)
     print(f"Map saved as {filename}")
 
+def create_scenario_map_3channel_with_last_channel_empty(scenario, scale=10, draw_standing_person=False):
+    """
+    Generates a 3-channel high-resolution scenario map.
+    
+    **Channel Definitions:**
+    - **Channel 1 (Red) 🟥**: Obstacles (rectangles, circles) & optionally standing persons & Walls & forbidden areas
+    - **Channel 2 (Green) 🟩**: Entrances
+    - **Channel 3 (Blue) 🟦**: Empty
+
+    Args:
+        scenario (dict): Scenario definition containing obstacles, walls, entrances, etc.
+        scale (int, optional): Resolution scaling factor (default=10).
+        draw_standing_person (bool, optional): Whether to include standing persons in channel 1.
+    Returns:
+        np.array: Generated 3-channel scenario map as a NumPy array.
+    """
+    # Build the standard 3-channel map first
+    base = create_scenario_map_3channel(
+        scenario, scale=scale, draw_standing_person=draw_standing_person
+    )
+
+    # Allocate output map
+    out = np.zeros_like(base)
+
+    # Merge obstacles (ch0) and walls/forbidden (ch1) into channel 0
+    out[:, :, 0] = np.maximum(base[:, :, 0], base[:, :, 1])
+
+    # Move entrances (original channel 2) into channel 1 (green)
+    out[:, :, 1] = base[:, :, 2]
+
+    # Leave last channel (2) empty (zeros)
+    return out
+
 def create_scenario_map_3channel(scenario, scale=10, draw_standing_person=False):
     """
     Generates a 3-channel high-resolution scenario map.
@@ -215,6 +248,16 @@ if __name__ == "__main__":
     save_map(grid_map, "scenario_map_highres.png")
 
     # Generate and save the 3-channel scenario map
-    grid_map_3channel = create_scenario_map_3channel(scen_map_example, scale=scale_factor, draw_standing_person=False)
+    grid_map_3channel = create_scenario_map_3channel(
+        scen_map_example, scale=scale_factor, draw_standing_person=False
+    )
     save_map_3channel(grid_map_3channel, f"scenario_{scen}_map_3channel.png")
+
+    # Generate and save the merged-first-two-channels variant (last channel empty)
+    grid_map_merged = create_scenario_map_3channel_with_last_channel_empty(
+        scen_map_example, scale=scale_factor, draw_standing_person=False
+    )
+    # Simple sanity check: ensure last channel is empty
+    assert (grid_map_merged[:, :, 2] == 0).all(), "Last channel should be empty"
+    save_map_3channel(grid_map_merged, f"scenario_{scen}_map_3channel_last_empty.png")
     #display_map_3channel(grid_map_3channel)

@@ -1,0 +1,46 @@
+
+# All splits use non-augmented ScenarioBatchDataLoader
+
+train:
+  epochs: 200
+  batch_size: 16
+  lr: 1.0e-3
+  encoder_backbone_lr_mult: 1.0
+  itr_per_epoch: 1.0e+8
+  dataloader: nonaugmented_scenario_batch
+
+valid:
+  batch_size: 16
+  dataloader: nonaugmented_scenario_batch
+
+test:
+  batch_size: 16
+  dataloader: nonaugmented_scenario_batch
+  eval_collision: true  # set true to compute collision metrics
+
+diffusion:
+  layers: 4
+  channels: 64
+  nheads: 8
+  diffusion_embedding_dim: 128
+  beta_start: 0.0001
+  beta_end: 0.5
+  num_steps: 50
+  schedule: "quad"
+  is_linear: False
+
+model:
+  is_unconditional: 0
+  timeemb: 128
+  featureemb: 16
+  scenmapemb: 256
+  target_strategy: "two_ends"
+  add_collision_loss: true
+  map_encoder:
+    grid_size: 7
+    finetune_from: "layer4"
+
+dataset:
+  scenarios: null
+  scen_map_variant: "merged_last_empty_with_poi"
+  poi_radius: 5
