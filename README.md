@@ -5,6 +5,8 @@ This is the github repository for the NeurIPS 2021 paper "[CSDI: Conditional Sco
 
 Please install the packages in requirements.txt
 
+You may want to delete torch in requirement and install torch manually (check the torch official website for installation).
+
 ## Preparation
 ### Download the healthcare dataset 
 ```shell
@@ -19,6 +21,12 @@ python download.py pm25
 Please put files in [GoogleDrive](https://drive.google.com/drive/folders/1krZQofLdeQrzunuKkLXy8L_kMzQrVFI_?usp=drive_link) to the "data" folder.
 
 ## Experiments 
+
+### training and imputation for track dataset
+
+```shell
+python exe_simulation.py --config exp_scenmap_nonaug_mix_two_ends_train.yaml --data_length 200
+```
 
 ### training and imputation for the healthcare dataset
 ```shell
