@@ -46,6 +46,7 @@ class ResnetMapEncoder(nn.Module):
     def __init__(
         self,
         output_dim=256,
+        in_channels=3,
         weights: ResNet18_Weights | None = ResNet18_Weights.DEFAULT,
         grid_size: int | tuple[int, int] = 7,
         finetune_from: str | None = "layer4",
@@ -60,6 +61,22 @@ class ResnetMapEncoder(nn.Module):
 
         # Load ResNet-18 with explicit weights enum (pretrained deprecates)
         resnet = models.resnet18(weights=weights)
+        if in_channels != 3:
+            old_conv = resnet.conv1
+            new_conv = nn.Conv2d(
+                in_channels,
+                old_conv.out_channels,
+                kernel_size=old_conv.kernel_size,
+                stride=old_conv.stride,
+                padding=old_conv.padding,
+                bias=False,
+            )
+            with torch.no_grad():
+                new_conv.weight[:, :3] = old_conv.weight
+                if in_channels > 3:
+                    extra = old_conv.weight.mean(dim=1, keepdim=True)
+                    new_conv.weight[:, 3:] = extra.repeat(1, in_channels - 3, 1, 1)
+            resnet.conv1 = new_conv
 
         # Optional light fine-tuning: unfreeze from a given stage (default: layer4)
         self._frozen_modules = []

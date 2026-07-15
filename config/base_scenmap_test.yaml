@@ -2,10 +2,11 @@
 #type: args
 
 train:
-  epochs: 100
-  batch_size: 8 
+  epochs: 20
+  batch_size: 16 
   lr: 1.0e-3
   itr_per_epoch: 1.0e+8
+
 
 diffusion:
   layers: 4 
@@ -16,11 +17,15 @@ diffusion:
   beta_end: 0.5
   num_steps: 50
   schedule: "quad"
-  is_linear: True
+  is_linear: False
 
 model:
   is_unconditional: 0
   timeemb: 128
   featureemb: 16
-  target_strategy: "test"
-  num_sample_features: 64
+  scenmapemb: 256
+  target_strategy: "random"
+
+dataset:
+  scenarios: null
+  scenmap_scale: 10

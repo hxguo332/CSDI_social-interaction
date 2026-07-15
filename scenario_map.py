@@ -134,7 +134,7 @@ def create_scenario_map_3channel(scenario, scale=10, draw_standing_person=False)
     Generates a 3-channel high-resolution scenario map.
     
     **Channel Definitions:**
-    - **Channel 1 (Red) 🟥**: Obstacles (rectangles, circles) & optionally standing persons
+    - **Channel 1 (Red) 🟥**: Obstacles (rectangles, circles) & optionally standing persons 
     - **Channel 2 (Green) 🟩**: Walls & forbidden areas
     - **Channel 3 (Blue) 🟦**: Entrances
 

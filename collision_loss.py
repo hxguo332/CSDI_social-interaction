@@ -98,3 +98,49 @@ def compute_collision_loss(
     #    "collision_rate": collision_rate.detach() if detach_stats else collision_rate,
     #    "mean_clearance": mean_clearance.detach() if detach_stats else mean_clearance
     }
+
+
+def compute_social_collision_loss(
+    pred_xy: torch.Tensor,
+    target_time_mask: torch.Tensor,
+    neighbor_xy: torch.Tensor,
+    neighbor_mask: torch.Tensor,
+    *,
+    margin: float = 0.04,
+    reduction: str = "mean",
+) -> Dict[str, torch.Tensor]:
+    """
+    Margin loss for ego-neighbor collision avoidance.
+
+    pred_xy: [B, L, 2], normalized predicted ego trajectory.
+    target_time_mask: [B, L], steps being optimized/evaluated.
+    neighbor_xy: [B, N, L, 2], normalized neighbor trajectories.
+    neighbor_mask: [B, N, L], valid neighbor states.
+    """
+    assert pred_xy.dim() == 3 and pred_xy.size(-1) == 2
+    assert neighbor_xy.dim() == 4 and neighbor_xy.size(-1) == 2
+    assert neighbor_mask.shape[:3] == neighbor_xy.shape[:3]
+
+    rel = pred_xy.unsqueeze(1) - neighbor_xy
+    dist = torch.linalg.norm(rel, dim=-1)
+    valid = neighbor_mask.float() * target_time_mask.unsqueeze(1).float()
+    point_loss = F.relu(margin - dist) ** 2 * valid
+    denom = valid.sum().clamp_min(1e-8)
+
+    if reduction == "mean":
+        loss = point_loss.sum() / denom
+    elif reduction == "sum":
+        loss = point_loss.sum()
+    elif reduction == "none":
+        loss = point_loss
+    else:
+        raise ValueError(f"Invalid reduction mode: {reduction}")
+
+    with torch.no_grad():
+        collision_rate = (((dist < margin).float() * valid).sum() / denom).detach()
+
+    return {
+        "loss": loss,
+        "L_social": loss,
+        "social_collision_rate": collision_rate,
+    }

@@ -1,0 +1,9 @@
+save/
+data/electricity/
+data/physio/
+data/pm25/
+debug_tracks/
+debug_failed_tracks/
+debug_maps/
+.env
+__pycache__/

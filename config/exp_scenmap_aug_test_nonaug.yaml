@@ -1,5 +1,5 @@
 
-# Train on augmented data; validate and test on non-augmented scenario-batch loader
+# All splits use augmented dataloaders with per-split augmentation settings
 
 train:
   epochs: 200
@@ -8,9 +8,12 @@ train:
   encoder_backbone_lr_mult: 1.0
   itr_per_epoch: 1.0e+8
   dataloader: augmented
-  augmentation_mode: "pad_and_resize"
+  augmentation_mode: "crop_and_resize"
+  # Options for resize: [height, width]
   resize_options:
+    - [384, 384]
     - [512, 512]
+    - [768, 768]
 
 valid:
   batch_size: 16
@@ -21,10 +24,7 @@ valid:
 
 test:
   batch_size: 16
-  dataloader: augmented
-  augmentation_mode: "pad_and_resize"
-  resize_options:
-    - [512, 512]
+  dataloader: nonaugmented_scenario_batch
   eval_collision: true  # set true to compute collision metrics
 
 diffusion:
@@ -43,9 +43,9 @@ model:
   timeemb: 128
   featureemb: 16
   scenmapemb: 256
-  target_strategy: "random"
+  target_strategy: "two_ends"
   map_encoder:
-    grid_size: 1
+    grid_size: 7
     finetune_from: "layer4"
 
 dataset:

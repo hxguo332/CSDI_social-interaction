@@ -7,7 +7,7 @@ import os
 
 from main_model import CSDI_SimulationScenmap
 from dataset_augmented_simulation import get_augmented_dataloader
-from utils import train, evaluate
+from utils import train, evaluate, build_preproc_tag_from_split_cfg
 
 def save_config(config, args):
     """Save configuration and args to a folder with timestamp."""
@@ -114,4 +114,5 @@ if __name__ == "__main__":
         model.load_state_dict(torch.load(foldername + "/model.pth"))
 
     sample_mode = args.sample_mode
-    evaluate(model, test_loader, nsample=args.nsample, scaler=1, foldername=foldername, mode=sample_mode)
+    preproc_tag = build_preproc_tag_from_split_cfg(config.get("test", {}), fallback_name=None)
+    evaluate(model, test_loader, nsample=args.nsample, scaler=1, foldername=foldername, mode=sample_mode, file_tag=preproc_tag)

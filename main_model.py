@@ -4,7 +4,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from diff_models import diff_CSDI
 from scenario_map_embedding import ResnetMapEncoder
-from collision_loss import compute_collision_loss
+from collision_loss import compute_collision_loss, compute_social_collision_loss
 
 
 class CSDI_base(nn.Module):
@@ -187,7 +187,7 @@ class CSDI_base(nn.Module):
                 w_obs=1, w_clear=0, margin=0, reduction="mean"
             )
 
-            collision_loss_weight = 10.0  # You can adjust this weight as needed
+            collision_loss_weight = 0.5  # You can adjust this weight as needed
             # Combine with your main noise-prediction loss
             loss = noise_loss + collision_loss["loss"] * collision_loss_weight
         else:
@@ -913,3 +913,427 @@ class CSDI_SimulationScenmap(CSDI_base):
             scenmap,
             scenmap_scales,
         )
+
+
+class SocialInteractionEncoder(nn.Module):
+    def __init__(self, hidden_dim=128, out_dim=128):
+        super().__init__()
+        self.input_mlp = nn.Sequential(
+            nn.Linear(6, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+        )
+        self.temporal_gru = nn.GRU(hidden_dim, hidden_dim, batch_first=True)
+        self.out = nn.Sequential(
+            nn.Linear(hidden_dim, out_dim),
+            nn.ReLU(),
+            nn.Linear(out_dim, out_dim),
+        )
+
+    def forward(self, ego_obs, neighbor_data, neighbor_mask):
+        # ego_obs: [B, 2, L], neighbor_data: [B, N, L, 2], mask: [B, N, L]
+        ego = ego_obs.permute(0, 2, 1)
+        ego_vel = torch.diff(ego, dim=1, prepend=ego[:, :1])
+        neigh_vel = torch.diff(neighbor_data, dim=2, prepend=neighbor_data[:, :, :1])
+
+        rel_pos = ego.unsqueeze(1) - neighbor_data
+        rel_vel = ego_vel.unsqueeze(1) - neigh_vel
+        feat = torch.cat([rel_pos, rel_vel, neighbor_data], dim=-1)
+        feat = self.input_mlp(feat)
+        feat = feat * neighbor_mask.unsqueeze(-1)
+
+        B, N, L, H = feat.shape
+        enc, _ = self.temporal_gru(feat.reshape(B * N, L, H))
+        enc = enc.reshape(B, N, L, H)
+        denom = neighbor_mask.sum(dim=(1, 2), keepdim=False).clamp_min(1.0).unsqueeze(-1)
+        pooled = (enc * neighbor_mask.unsqueeze(-1)).sum(dim=(1, 2)) / denom
+        return self.out(pooled)
+
+
+class GameAwareFusion(nn.Module):
+    def __init__(self, base_dim, social_dim, fusion_dim, conflict_dim=3):
+        super().__init__()
+        self.base_proj = nn.Linear(base_dim, fusion_dim)
+        self.social_proj = nn.Linear(social_dim, fusion_dim)
+        self.gate = nn.Sequential(
+            nn.Linear(fusion_dim * 2 + conflict_dim, fusion_dim),
+            nn.ReLU(),
+            nn.Linear(fusion_dim, fusion_dim),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, base_embed, social_embed, conflict_features):
+        base = self.base_proj(base_embed)
+        social = self.social_proj(social_embed)
+        gate = self.gate(torch.cat([base, social, conflict_features], dim=-1))
+        fusion = gate * base + (1.0 - gate) * social
+        return fusion, gate
+
+
+class CSDI_SocialFusionScenmap(CSDI_base):
+    """
+    Thesis model:
+    ego + scene-goal base branch, explicit social branch, game-aware fusion,
+    and optional obstacle/social compliance loss.
+    """
+
+    def __init__(self, config, device, target_dim=2, scale_embed_dim=4):
+        super(CSDI_base, self).__init__()
+        self.device = device
+        self.target_dim = target_dim
+        self.scale_embed_dim = scale_embed_dim
+
+        model_cfg = config["model"]
+        self.emb_time_dim = model_cfg["timeemb"]
+        self.emb_feature_dim = model_cfg["featureemb"]
+        self.emb_scenmap_dim = model_cfg["scenmapemb"]
+        self.social_dim = model_cfg.get("socialemb", 128)
+        self.fusion_dim = model_cfg.get("fusionemb", self.emb_scenmap_dim)
+        self.is_unconditional = model_cfg["is_unconditional"]
+        self.target_strategy = model_cfg["target_strategy"]
+        self.add_collision_loss = model_cfg.get("add_collision_loss", False)
+        self.add_social_collision_loss = model_cfg.get("add_social_collision_loss", True)
+        self.enable_goal_guidance = bool(model_cfg.get("enable_goal_guidance", True))
+        self.collision_loss_weight = float(model_cfg.get("collision_loss_weight", 0.5))
+        self.social_collision_loss_weight = float(model_cfg.get("social_collision_loss_weight", 0.5))
+        self.social_margin = float(model_cfg.get("social_margin", 0.04))
+        self.enable_social_branch = bool(model_cfg.get("enable_social_branch", True))
+        self.enable_game_fusion = bool(model_cfg.get("enable_game_fusion", True))
+
+        self.scale_dim = 2
+        self.scale_mlp = nn.Sequential(
+            nn.Linear(self.scale_dim, 16),
+            nn.ReLU(),
+            nn.Linear(16, self.scale_embed_dim),
+        )
+
+        me_cfg = model_cfg.get("map_encoder", {}) if isinstance(model_cfg, dict) else {}
+        self.emb_scenmap = ResnetMapEncoder(
+            self.emb_scenmap_dim,
+            model_cfg.get("scene_goal_channels", 5),
+            None,
+            me_cfg.get("grid_size", 7),
+            me_cfg.get("finetune_from", "layer4")
+        )
+        self.embed_layer = nn.Embedding(self.target_dim, self.emb_feature_dim)
+        self.ego_mlp = nn.Sequential(
+            nn.Linear(self.target_dim * 2, 64),
+            nn.ReLU(),
+            nn.Linear(64, self.emb_scenmap_dim),
+        )
+        self.social_encoder = SocialInteractionEncoder(
+            hidden_dim=model_cfg.get("social_hidden", 128),
+            out_dim=self.social_dim,
+        )
+        self.fusion = GameAwareFusion(
+            base_dim=self.emb_scenmap_dim * 2,
+            social_dim=self.social_dim,
+            fusion_dim=self.fusion_dim,
+        )
+
+        self.emb_total_dim = (
+            self.emb_time_dim
+            + self.emb_feature_dim
+            + self.fusion_dim
+            + self.scale_embed_dim
+        )
+        if self.is_unconditional == False:
+            self.emb_total_dim += 1
+
+        config_diff = config["diffusion"]
+        config_diff["side_dim"] = self.emb_total_dim
+        input_dim = 1 if self.is_unconditional == True else 2
+        self.diffmodel = diff_CSDI(config_diff, input_dim)
+
+        self.num_steps = config_diff["num_steps"]
+        if config_diff["schedule"] == "quad":
+            self.beta = np.linspace(
+                config_diff["beta_start"] ** 0.5,
+                config_diff["beta_end"] ** 0.5,
+                self.num_steps,
+            ) ** 2
+        elif config_diff["schedule"] == "linear":
+            self.beta = np.linspace(
+                config_diff["beta_start"], config_diff["beta_end"], self.num_steps
+            )
+        else:
+            raise ValueError(f"Unknown diffusion schedule {config_diff['schedule']}")
+
+        self.alpha_hat = 1 - self.beta
+        self.alpha = np.cumprod(self.alpha_hat)
+        self.alpha_torch = torch.tensor(self.alpha).float().to(self.device).unsqueeze(1).unsqueeze(1)
+        self.last_fusion_gate = None
+
+    def _append_goal_to_map(self, scenmap, goal_heatmap):
+        # scenmap: [B, C, H, W], goal_heatmap: [B, H, W, 2]
+        if self.enable_goal_guidance:
+            goal = goal_heatmap.to(self.device).float().permute(0, 3, 1, 2)
+            if goal.shape[-2:] != scenmap.shape[-2:]:
+                goal = F.interpolate(goal, size=scenmap.shape[-2:], mode="bilinear", align_corners=False)
+        else:
+            goal = torch.zeros(
+                scenmap.shape[0],
+                2,
+                scenmap.shape[-2],
+                scenmap.shape[-1],
+                device=scenmap.device,
+                dtype=scenmap.dtype,
+            )
+        return torch.cat([scenmap, goal], dim=1)
+
+    def get_side_info(
+        self,
+        observed_tp,
+        cond_mask,
+        scenmap,
+        scenmap_scales,
+        observed_data,
+        neighbor_data,
+        neighbor_mask,
+        conflict_features,
+    ):
+        B, K, L = cond_mask.shape
+        time_embed = self.time_embedding(observed_tp, self.emb_time_dim)
+        time_embed = time_embed.unsqueeze(2).expand(-1, -1, K, -1)
+        feature_embed = self.embed_layer(torch.arange(self.target_dim).to(self.device))
+        feature_embed = feature_embed.unsqueeze(0).unsqueeze(0).expand(B, L, -1, -1)
+
+        side_info = torch.cat([time_embed, feature_embed], dim=-1).permute(0, 3, 2, 1)
+        if self.is_unconditional == False:
+            side_info = torch.cat([side_info, cond_mask.unsqueeze(1)], dim=1)
+
+        scene_embed = self.emb_scenmap(scenmap)
+        ego_summary = torch.cat([observed_data[:, :, 0], observed_data[:, :, -1]], dim=1)
+        ego_embed = self.ego_mlp(ego_summary)
+        base_embed = torch.cat([scene_embed, ego_embed], dim=-1)
+
+        if self.enable_social_branch:
+            social_embed = self.social_encoder(observed_data, neighbor_data, neighbor_mask)
+        else:
+            social_embed = torch.zeros(B, self.social_dim, device=self.device)
+
+        if self.enable_game_fusion:
+            fusion_embed, gate = self.fusion(base_embed, social_embed, conflict_features)
+        else:
+            base_proj = self.fusion.base_proj(base_embed)
+            if self.enable_social_branch:
+                social_proj = self.fusion.social_proj(social_embed)
+                fusion_embed = 0.5 * (base_proj + social_proj)
+                gate = torch.full_like(fusion_embed, 0.5)
+            else:
+                fusion_embed = base_proj
+                gate = torch.ones_like(fusion_embed)
+        self.last_fusion_gate = gate.detach()
+
+        fusion_embed = fusion_embed.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, K, L)
+        side_info = torch.cat([side_info, fusion_embed], dim=1)
+
+        scale_embed = self.scale_mlp(scenmap_scales)
+        scale_embed = scale_embed.unsqueeze(-1).unsqueeze(-1).expand(-1, self.scale_embed_dim, K, L)
+        side_info = torch.cat([side_info, scale_embed], dim=1)
+        return side_info
+
+    def process_data(self, batch):
+        observed_data = batch["observed_data"].to(self.device).float()
+        observed_mask = batch["observed_mask"].to(self.device).float()
+        observed_tp = batch["timepoints"].to(self.device).float()
+        gt_mask = batch["gt_mask"].to(self.device).float()
+        scenmap = batch["scen_map"].to(self.device).float().permute(0, 3, 1, 2)
+        scenmap_scales = batch["scen_map_scale"].to(self.device).float()
+        goal_heatmap = batch["goal_heatmap"].to(self.device).float()
+        neighbor_data = batch["neighbor_data"].to(self.device).float()
+        neighbor_mask = batch["neighbor_mask"].to(self.device).float()
+        conflict_features = batch["conflict_features"].to(self.device).float()
+
+        scenmap = self._append_goal_to_map(scenmap, goal_heatmap)
+        observed_data = observed_data.permute(0, 2, 1)
+        observed_mask = observed_mask.permute(0, 2, 1)
+        gt_mask = gt_mask.permute(0, 2, 1)
+        cut_length = torch.zeros(len(observed_data)).long().to(self.device)
+        for_pattern_mask = observed_mask
+        return (
+            observed_data,
+            observed_mask,
+            observed_tp,
+            gt_mask,
+            for_pattern_mask,
+            cut_length,
+            scenmap,
+            scenmap_scales,
+            neighbor_data,
+            neighbor_mask,
+            conflict_features,
+        )
+
+    def _make_cond_mask(self, observed_mask, gt_mask, for_pattern_mask, is_train):
+        if is_train == 0:
+            return gt_mask
+        if self.target_strategy == "two_ends":
+            return gt_mask
+        if self.target_strategy == "mix_two_ends":
+            return gt_mask if np.random.rand() > 0.8 else self.get_randmask(observed_mask)
+        if self.target_strategy in ("hist", "mix"):
+            return self.get_hist_mask(observed_mask, for_pattern_mask=for_pattern_mask)
+        if self.target_strategy == "random":
+            return self.get_randmask(observed_mask)
+        return gt_mask
+
+    def calc_loss(
+        self,
+        observed_data,
+        cond_mask,
+        observed_mask,
+        side_info,
+        is_train,
+        set_t=-1,
+        sdf=None,
+        neighbor_data=None,
+        neighbor_mask=None,
+    ):
+        B, K, L = observed_data.shape
+        t = (torch.ones(B) * set_t).long().to(self.device) if is_train != 1 else torch.randint(0, self.num_steps, [B]).to(self.device)
+        current_alpha = self.alpha_torch[t]
+        noise = torch.randn_like(observed_data)
+        noisy_data = (current_alpha ** 0.5) * observed_data + (1.0 - current_alpha) ** 0.5 * noise
+        total_input = self.set_input_to_diffmodel(noisy_data, observed_data, cond_mask)
+        predicted = self.diffmodel(total_input, side_info, t)
+
+        target_mask = observed_mask - cond_mask
+        residual = (noise - predicted) * target_mask
+        num_eval = target_mask.sum()
+        if num_eval == 0:
+            raise ValueError("No valid target points to evaluate.")
+        loss = (residual ** 2).sum() / num_eval
+
+        x0_hat = self.estimate_x0_from_xt(noisy_data, predicted, current_alpha)
+        xy = torch.stack([x0_hat[:, 0, :], x0_hat[:, 1, :]], dim=-1)
+        ta_time_mask = (target_mask.max(dim=1).values > 0).float()
+
+        if self.add_collision_loss and sdf is not None:
+            col = compute_collision_loss(
+                xy,
+                ta_time_mask,
+                self.gen_raster_sdf_fn(sdf),
+                w_obs=1,
+                w_clear=0,
+                margin=0,
+                reduction="mean",
+            )
+            loss = loss + self.collision_loss_weight * col["loss"]
+
+        if self.add_social_collision_loss and neighbor_data is not None and neighbor_mask is not None:
+            social_col = compute_social_collision_loss(
+                xy,
+                ta_time_mask,
+                neighbor_data,
+                neighbor_mask,
+                margin=self.social_margin,
+                reduction="mean",
+            )
+            loss = loss + self.social_collision_loss_weight * social_col["loss"]
+        return loss
+
+    def calc_loss_valid(
+        self,
+        observed_data,
+        cond_mask,
+        observed_mask,
+        side_info,
+        is_train,
+        sdf=None,
+        neighbor_data=None,
+        neighbor_mask=None,
+    ):
+        loss_sum = 0
+        for t in range(self.num_steps):
+            loss_sum += self.calc_loss(
+                observed_data,
+                cond_mask,
+                observed_mask,
+                side_info,
+                is_train,
+                set_t=t,
+                sdf=sdf,
+                neighbor_data=neighbor_data,
+                neighbor_mask=neighbor_mask,
+            ).detach()
+        return loss_sum / self.num_steps
+
+    def forward(self, batch, is_train=1):
+        (
+            observed_data,
+            observed_mask,
+            observed_tp,
+            gt_mask,
+            for_pattern_mask,
+            _,
+            scenmap,
+            scenmap_scales,
+            neighbor_data,
+            neighbor_mask,
+            conflict_features,
+        ) = self.process_data(batch)
+        cond_mask = self._make_cond_mask(observed_mask, gt_mask, for_pattern_mask, is_train)
+        side_info = self.get_side_info(
+            observed_tp,
+            cond_mask,
+            scenmap,
+            scenmap_scales,
+            observed_data,
+            neighbor_data,
+            neighbor_mask,
+            conflict_features,
+        )
+        sdf = batch["sdf"].to(self.device).float() if self.add_collision_loss and "sdf" in batch else None
+        loss_func = self.calc_loss if is_train == 1 else self.calc_loss_valid
+        return loss_func(
+            observed_data,
+            cond_mask,
+            observed_mask,
+            side_info,
+            is_train,
+            sdf=sdf,
+            neighbor_data=neighbor_data,
+            neighbor_mask=neighbor_mask,
+        )
+
+    def evaluate(self, batch, n_samples, mode="normalized"):
+        (
+            observed_data,
+            observed_mask,
+            observed_tp,
+            gt_mask,
+            _,
+            cut_length,
+            scenmap,
+            scenmap_scales,
+            neighbor_data,
+            neighbor_mask,
+            conflict_features,
+        ) = self.process_data(batch)
+        with torch.no_grad():
+            cond_mask = gt_mask
+            target_mask = observed_mask - cond_mask
+            side_info = self.get_side_info(
+                observed_tp,
+                cond_mask,
+                scenmap,
+                scenmap_scales,
+                observed_data,
+                neighbor_data,
+                neighbor_mask,
+                conflict_features,
+            )
+            samples = self.impute(observed_data, cond_mask, side_info, n_samples)
+            for i in range(len(cut_length)):
+                target_mask[i, ..., 0 : cut_length[i].item()] = 0
+
+        if mode == "unnormalized":
+            B, _, H, W = scenmap.shape
+            scale_wh = torch.tensor([W, H], device=samples.device, dtype=samples.dtype)
+            samples = samples * scale_wh.view(1, 1, 2, 1)
+            observed_data = observed_data * scale_wh.view(1, 2, 1)
+            samples = samples * scenmap_scales.unsqueeze(1).unsqueeze(3)
+            observed_data = observed_data * scenmap_scales.unsqueeze(2)
+        return samples, observed_data, target_mask, observed_mask, observed_tp

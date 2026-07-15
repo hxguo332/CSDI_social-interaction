@@ -242,7 +242,97 @@ def compute_batch_metrics(samples_median, c_target, eval_points, scaler):
     return mse_current.sum().item(), mae_current.sum().item()
 
 
-def save_generated_outputs(foldername, nsample, all_target, all_evalpoint, all_observed_point, all_observed_time, all_generated_samples, scaler, mean_scaler, mode=None, tag=None):
+def select_validity_aware_sample(
+    samples,
+    eval_points,
+    scen_maps_batch=None,
+    scenmap_scale=None,
+    mode: str = "normalized",
+    neighbor_data=None,
+    neighbor_mask=None,
+    social_margin: float = 0.04,
+):
+    """
+    Select one trajectory per case from stochastic diffusion samples.
+
+    Priority:
+      1. lowest invalid/collision step count;
+      2. among ties, closest to the element-wise sample median.
+
+    samples: [B, S, L, 2]
+    eval_points: [B, L, 2]
+    scen_maps_batch: optional [B, 3, H, W]
+    """
+    median = samples.median(dim=1).values
+    if scen_maps_batch is None:
+        return median
+
+    B, S, L, _ = samples.shape
+    collision_mask = (scen_maps_batch[:, 0] > 0) | (scen_maps_batch[:, 1] > 0)
+    H = scen_maps_batch.shape[2]
+    W = scen_maps_batch.shape[3]
+
+    if mode == "normalized":
+        x_float = samples[..., 0] * W
+        y_float = samples[..., 1] * H
+    elif mode == "unnormalized":
+        if not isinstance(scenmap_scale, torch.Tensor):
+            scenmap_scale = torch.full((B, 2), float(scenmap_scale), device=samples.device, dtype=samples.dtype)
+        else:
+            if scenmap_scale.dim() == 1:
+                scenmap_scale = scenmap_scale.view(B, 1).repeat(1, 2)
+            elif scenmap_scale.shape[-1] == 1:
+                scenmap_scale = scenmap_scale.view(B, 1).repeat(1, 2)
+        eps = torch.finfo(samples.dtype).eps
+        x_float = samples[..., 0] / (scenmap_scale[:, 0].view(B, 1, 1) + eps)
+        y_float = samples[..., 1] / (scenmap_scale[:, 1].view(B, 1, 1) + eps)
+    else:
+        raise ValueError(f"Unsupported mode for select_validity_aware_sample: {mode}")
+
+    valid_t = eval_points[..., 0] > 0
+    valid_t_s = valid_t.unsqueeze(1).expand(-1, S, -1)
+
+    oob = (x_float < 0) | (x_float >= (W - 1e-6)) | (y_float < 0) | (y_float >= (H - 1e-6))
+    x = x_float.long().clamp(0, W - 1)
+    y = y_float.long().clamp(0, H - 1)
+    bidx = torch.arange(B, device=samples.device).view(B, 1, 1).expand(B, S, L)
+    map_collision = collision_mask[bidx, y, x] | oob
+    invalid = map_collision & valid_t_s
+
+    if neighbor_data is not None and neighbor_mask is not None:
+        if not isinstance(neighbor_data, torch.Tensor):
+            neighbor_data = torch.from_numpy(neighbor_data)
+        if not isinstance(neighbor_mask, torch.Tensor):
+            neighbor_mask = torch.from_numpy(neighbor_mask)
+        neighbor_data = neighbor_data.to(samples.device).float()
+        neighbor_mask = neighbor_mask.to(samples.device).float()
+        social_dist = torch.linalg.norm(samples.unsqueeze(2) - neighbor_data.unsqueeze(1), dim=-1)
+        social_collision = (social_dist < social_margin) & (neighbor_mask.unsqueeze(1) > 0)
+        social_collision = social_collision.any(dim=2) & valid_t_s
+        invalid = invalid | social_collision
+
+    invalid_count = invalid.float().sum(dim=-1)  # [B,S]
+    median_dist = torch.linalg.norm((samples - median.unsqueeze(1)) * eval_points.unsqueeze(1), dim=-1).sum(dim=-1)
+    # Large constant makes invalid count primary and median distance secondary.
+    score = invalid_count * 1e6 + median_dist
+    best_idx = score.argmin(dim=1)
+    return samples[torch.arange(B, device=samples.device), best_idx]
+
+
+def save_generated_outputs(
+    foldername,
+    nsample,
+    all_target,
+    all_evalpoint,
+    all_observed_point,
+    all_observed_time,
+    all_generated_samples,
+    scaler,
+    mean_scaler,
+    mode=None,
+    tag=None,
+    behavior_context=None,
+):
     """
     Save generated outputs to a pickle file.
 
@@ -270,6 +360,7 @@ def save_generated_outputs(foldername, nsample, all_target, all_evalpoint, all_o
                 all_observed_time,
                 scaler,
                 mean_scaler,
+                behavior_context,
             ],
             f,
         )
@@ -313,7 +404,17 @@ class CollisionEvaluator:
 
         self.scenmap_scale = scenmap_scale
 
-    def update(self, samples_batch, scen_maps_batch, eval_points, scenmap_scale, mode: str = "normalized"):
+    def update(
+        self,
+        samples_batch,
+        scen_maps_batch,
+        eval_points,
+        scenmap_scale,
+        mode: str = "normalized",
+        neighbor_data=None,
+        neighbor_mask=None,
+        social_margin: float = 0.04,
+    ):
         """
         Update the collision metrics with a new batch of data.
 
@@ -366,13 +467,14 @@ class CollisionEvaluator:
         else:
             raise ValueError(f"Unsupported mode for CollisionEvaluator.update: {mode}")
 
-        # Apply eval_points mask to avoid unintended indices; keep float for OOB checks
-        x_float = x_float * eval_points[..., 0]
-        y_float = y_float * eval_points[..., 1]
+        # Only evaluate predicted / imputed target points. Do not multiply
+        # non-evaluation coordinates by zero before the out-of-bounds check,
+        # otherwise masked-out points may be incorrectly counted as collisions.
+        valid_eval = eval_points[..., 0] > 0
 
-        # Out-of-bounds: before clamping, flag as collision if outside map
-        oob_x = (x_float < 0) | (x_float >= (W - 1e-6))
-        oob_y = (y_float < 0) | (y_float >= (H - 1e-6))
+        # Out-of-bounds: before clamping, flag as collision only at eval points.
+        oob_x = ((x_float < 0) | (x_float >= (W - 1e-6))) & valid_eval
+        oob_y = ((y_float < 0) | (y_float >= (H - 1e-6))) & valid_eval
         collision_position = oob_x | oob_y
 
         # Discretize to integer pixel indices
@@ -382,9 +484,21 @@ class CollisionEvaluator:
         # Generate batch indices
         batch_indices = torch.arange(batch_size, device=samples_batch.device).view(-1, 1).expand(-1, sample_length)
 
-        # Collisions against obstacle mask under eval points
-        collision = collision_mask[batch_indices, y, x] * eval_points[..., 0]
-        collision = collision.bool() | collision_position
+        # Collisions against obstacle mask under eval points only.
+        collision = collision_mask[batch_indices, y, x] & valid_eval
+        collision = collision | collision_position
+
+        if neighbor_data is not None and neighbor_mask is not None:
+            if not isinstance(neighbor_data, torch.Tensor):
+                neighbor_data = torch.from_numpy(neighbor_data)
+            if not isinstance(neighbor_mask, torch.Tensor):
+                neighbor_mask = torch.from_numpy(neighbor_mask)
+            neighbor_data = neighbor_data.to(samples_batch.device).float()
+            neighbor_mask = neighbor_mask.to(samples_batch.device).float()
+            social_dist = torch.linalg.norm(samples_batch.unsqueeze(1) - neighbor_data, dim=-1)
+            social_collision = (social_dist < social_margin) & (neighbor_mask > 0)
+            social_collision = social_collision.any(dim=1) & (eval_points[..., 0] > 0)
+            collision = collision | social_collision
 
         # Calculate collision rate for the batch, calculated by each sample
         batch_collisions = torch.any(collision, dim=1).sum().item()  # Number of paths with at least one collision
@@ -469,6 +583,8 @@ def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldernam
 
         all_target, all_observed_point, all_observed_time = [], [], []
         all_evalpoint, all_generated_samples = [], []
+        all_neighbor_data, all_neighbor_mask, all_conflict_features = [], [], []
+        all_scen_map, all_goal_heatmap = [], []
 
         with tqdm(test_loader, mininterval=5.0, maxinterval=50.0) as it:
             for batch_no, test_batch in enumerate(it, start=1):
@@ -495,8 +611,34 @@ def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldernam
                     output = model.evaluate(test_batch, nsample)
 
                 samples, c_target, eval_points, observed_points, observed_time = process_batch_data(output)
-                # Compute the median of the generated samples
-                samples_median = samples.median(dim=1).values
+
+                selection_scen_map = None
+                selection_scen_scale = None
+                if isinstance(test_batch, dict):
+                    batch_map = test_batch.get("scen_map_raw", test_batch.get("scen_map", None))
+                    if batch_map is not None:
+                        bm = batch_map if isinstance(batch_map, torch.Tensor) else torch.from_numpy(batch_map)
+                        if bm.dim() == 4 and bm.shape[-1] == 3:
+                            bm = bm.permute(0, 3, 1, 2)
+                        selection_scen_map = bm.to(samples.device).float()
+
+                    if "scen_map_scale" in test_batch:
+                        sms = test_batch["scen_map_scale"]
+                        selection_scen_scale = sms.to(samples.device).float() if isinstance(sms, torch.Tensor) else torch.from_numpy(sms).to(samples.device).float()
+
+                ce_mode = mode if mode is not None else "normalized"
+                neighbor_data_for_selection = test_batch.get("neighbor_data", None) if isinstance(test_batch, dict) else None
+                neighbor_mask_for_selection = test_batch.get("neighbor_mask", None) if isinstance(test_batch, dict) else None
+                samples_median = select_validity_aware_sample(
+                    samples,
+                    eval_points,
+                    scen_maps_batch=selection_scen_map,
+                    scenmap_scale=selection_scen_scale,
+                    mode=ce_mode,
+                    neighbor_data=neighbor_data_for_selection,
+                    neighbor_mask=neighbor_mask_for_selection,
+                    social_margin=getattr(model, "social_margin", 0.04),
+                )
 
                 if collision_evaluator is not None:
                     # Always use scen_map from batch (raw or original). Do not use scen_map_out returned by the model,
@@ -532,7 +674,19 @@ def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldernam
 
                     ce_mode = mode if mode is not None else "normalized"
                     if (scen_map_tensor is not None) and (scen_maps_scale_tensor is not None):
-                        collision_evaluator.update(samples_median, scen_map_tensor, eval_points, scen_maps_scale_tensor, mode=ce_mode)
+                        neighbor_data = test_batch.get("neighbor_data", None) if isinstance(test_batch, dict) else None
+                        neighbor_mask = test_batch.get("neighbor_mask", None) if isinstance(test_batch, dict) else None
+                        social_margin = getattr(model, "social_margin", 0.04)
+                        collision_evaluator.update(
+                            samples_median,
+                            scen_map_tensor,
+                            eval_points,
+                            scen_maps_scale_tensor,
+                            mode=ce_mode,
+                            neighbor_data=neighbor_data,
+                            neighbor_mask=neighbor_mask,
+                            social_margin=social_margin,
+                        )
 
                 # Append results to the respective lists
                 all_target.append(c_target)
@@ -540,6 +694,16 @@ def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldernam
                 all_observed_point.append(observed_points)
                 all_observed_time.append(observed_time)
                 all_generated_samples.append(samples)
+
+                if isinstance(test_batch, dict):
+                    if "neighbor_data" in test_batch:
+                        all_neighbor_data.append(test_batch["neighbor_data"].detach().cpu())
+                    if "neighbor_mask" in test_batch:
+                        all_neighbor_mask.append(test_batch["neighbor_mask"].detach().cpu())
+                    if "conflict_features" in test_batch:
+                        all_conflict_features.append(test_batch["conflict_features"].detach().cpu())
+                    # Do not store scen_map / goal_heatmap per sample; they are large and can exceed quota.
+                    # Visualization can reload maps separately if needed.
 
                 # Compute MSE and MAE for the current batch
                 mse_current, mae_current = compute_batch_metrics(samples_median, c_target, eval_points, scaler)
@@ -560,9 +724,28 @@ def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldernam
                 )
 
         # Save generated outputs
-        save_generated_outputs(foldername, nsample, torch.cat(all_target, dim=0), torch.cat(all_evalpoint, dim=0),
-                               torch.cat(all_observed_point, dim=0), torch.cat(all_observed_time, dim=0),
-                               torch.cat(all_generated_samples, dim=0), scaler, mean_scaler, mode, tag=file_tag)
+        behavior_context = {
+            "neighbor_data": torch.cat(all_neighbor_data, dim=0) if all_neighbor_data else None,
+            "neighbor_mask": torch.cat(all_neighbor_mask, dim=0) if all_neighbor_mask else None,
+            "conflict_features": torch.cat(all_conflict_features, dim=0) if all_conflict_features else None,
+            "scen_map": None,
+            "goal_heatmap": None,
+        }
+
+        save_generated_outputs(
+            foldername,
+            nsample,
+            torch.cat(all_target, dim=0),
+            torch.cat(all_evalpoint, dim=0),
+            torch.cat(all_observed_point, dim=0),
+            torch.cat(all_observed_time, dim=0),
+            torch.cat(all_generated_samples, dim=0),
+            scaler,
+            mean_scaler,
+            mode,
+            tag=file_tag,
+            behavior_context=behavior_context,
+        )
 
         # Compute CRPS metrics
         CRPS, CRPS_sum = compute_crps_metrics(torch.cat(all_target, dim=0), torch.cat(all_generated_samples, dim=0),
