@@ -36,7 +36,7 @@ VARIANTS=("social" "fusion" "obs_loss" "social_loss")
 SCENARIO=${SCENARIOS[$SLURM_ARRAY_TASK_ID]}
 
 module purge
-module load GPU/buildenv-nvhpc/25.9-cu13.0
+module load GPU/Python/3.13.5-bundle-SciPy-2025.07-mpi4py-4.1.0-gcc-2025b-eb
 
 [[ -x "$PYTHON" ]] || { echo "Missing GPU Python environment: $PYTHON" >&2; exit 1; }
 cd "$PROJECT_DIR"
