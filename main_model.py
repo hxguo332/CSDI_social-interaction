@@ -386,14 +386,12 @@ class CSDI_base(nn.Module):
             for_pattern_mask,
             _,
         ) = self.process_data(batch)
-        if is_train == 0:
+        if is_train == 0 or self.target_strategy == "know_first":
             cond_mask = gt_mask
-        elif self.target_strategy != "random":
-            cond_mask = self.get_hist_mask(
-                observed_mask, for_pattern_mask=for_pattern_mask
-            )
-        else:
+        elif self.target_strategy == "random":
             cond_mask = self.get_randmask(observed_mask)
+        else:
+            raise NotImplementedError(f"Target strategy {self.target_strategy} not implemented.")
 
         side_info = self.get_side_info(observed_tp, cond_mask)
 
@@ -508,17 +506,8 @@ class CSDI_Simulation(CSDI_base):
         ) = self.process_data(batch)
         if is_train == 0:
             cond_mask = gt_mask
-        elif self.target_strategy == "two_ends":
+        elif self.target_strategy == "know_first":
             cond_mask = gt_mask
-        elif self.target_strategy == "mix_two_ends":
-            if np.random.rand() > 0.8:
-                cond_mask = gt_mask
-            else:
-                cond_mask = self.get_randmask(observed_mask)
-        elif self.target_strategy == "hist" or self.target_strategy == "mix":
-            cond_mask = self.get_hist_mask(
-                observed_mask, for_pattern_mask=for_pattern_mask
-            )
         elif self.target_strategy == "random":
             cond_mask = self.get_randmask(observed_mask)
         else:
@@ -790,17 +779,8 @@ class CSDI_SimulationScenmap(CSDI_base):
         ) = self.process_data(batch)
         if is_train == 0:
             cond_mask = gt_mask
-        elif self.target_strategy == "two_ends":
+        elif self.target_strategy == "know_first":
             cond_mask = gt_mask
-        elif self.target_strategy == "mix_two_ends":
-            if np.random.rand() > 0.8:
-                cond_mask = gt_mask
-            else:
-                cond_mask = self.get_randmask(observed_mask)
-        elif self.target_strategy == "hist" or self.target_strategy == "mix":
-            cond_mask = self.get_hist_mask(
-                observed_mask, for_pattern_mask=for_pattern_mask
-            )
         elif self.target_strategy == "random":
             cond_mask = self.get_randmask(observed_mask)
         else:
@@ -997,6 +977,10 @@ class CSDI_SocialFusionScenmap(CSDI_base):
         self.enable_goal_guidance = bool(model_cfg.get("enable_goal_guidance", True))
         self.collision_loss_weight = float(model_cfg.get("collision_loss_weight", 0.5))
         self.social_collision_loss_weight = float(model_cfg.get("social_collision_loss_weight", 0.5))
+        self.obstacle_clearance_weight = float(model_cfg.get("obstacle_clearance_weight", 1.0))
+        self.obstacle_clearance_margin = float(model_cfg.get("obstacle_clearance_margin", 0.01))
+        self.clearance_loss_weight = float(model_cfg.get("clearance_loss_weight", self.collision_loss_weight))
+        self.path_collision_loss_weight = float(model_cfg.get("path_collision_loss_weight", self.collision_loss_weight))
         self.social_margin = float(model_cfg.get("social_margin", 0.04))
         self.enable_social_branch = bool(model_cfg.get("enable_social_branch", True))
         self.enable_game_fusion = bool(model_cfg.get("enable_game_fusion", True))
@@ -1104,7 +1088,20 @@ class CSDI_SocialFusionScenmap(CSDI_base):
             side_info = torch.cat([side_info, cond_mask.unsqueeze(1)], dim=1)
 
         scene_embed = self.emb_scenmap(scenmap)
-        ego_summary = torch.cat([observed_data[:, :, 0], observed_data[:, :, -1]], dim=1)
+        # Summarize only conditioned observations. Reading index -1 directly
+        # leaks the true future endpoint for know-first tasks.
+        known = cond_mask[:, 0] > 0
+        time_idx = torch.arange(L, device=observed_data.device).expand(B, -1)
+        first_known_idx = time_idx.masked_fill(~known, L).min(dim=1).values.clamp_max(L - 1)
+        last_known_idx = time_idx.masked_fill(~known, -1).max(dim=1).values.clamp_min(0)
+        batch_idx = torch.arange(B, device=observed_data.device)
+        ego_summary = torch.cat(
+            [
+                observed_data[batch_idx, :, first_known_idx],
+                observed_data[batch_idx, :, last_known_idx],
+            ],
+            dim=1,
+        )
         ego_embed = self.ego_mlp(ego_summary)
         base_embed = torch.cat([scene_embed, ego_embed], dim=-1)
 
@@ -1169,15 +1166,11 @@ class CSDI_SocialFusionScenmap(CSDI_base):
     def _make_cond_mask(self, observed_mask, gt_mask, for_pattern_mask, is_train):
         if is_train == 0:
             return gt_mask
-        if self.target_strategy == "two_ends":
+        if self.target_strategy == "know_first":
             return gt_mask
-        if self.target_strategy == "mix_two_ends":
-            return gt_mask if np.random.rand() > 0.8 else self.get_randmask(observed_mask)
-        if self.target_strategy in ("hist", "mix"):
-            return self.get_hist_mask(observed_mask, for_pattern_mask=for_pattern_mask)
         if self.target_strategy == "random":
             return self.get_randmask(observed_mask)
-        return gt_mask
+        raise NotImplementedError(f"Target strategy {self.target_strategy} not implemented.")
 
     def calc_loss(
         self,
@@ -1216,11 +1209,21 @@ class CSDI_SocialFusionScenmap(CSDI_base):
                 ta_time_mask,
                 self.gen_raster_sdf_fn(sdf),
                 w_obs=1,
-                w_clear=0,
-                margin=0,
+                w_clear=self.obstacle_clearance_weight,
+                margin=self.obstacle_clearance_margin,
                 reduction="mean",
             )
-            loss = loss + self.collision_loss_weight * col["loss"]
+            # total_loss = diffusion_loss
+            #            + lambda_point  * pointwise_collision_loss
+            #            + lambda_clear  * clearance_loss
+            #            + lambda_path   * path_collision_loss
+            #            + lambda_social * social_collision_loss
+            loss = (
+                loss
+                + self.collision_loss_weight * col["L_obs"]
+                + self.clearance_loss_weight * self.obstacle_clearance_weight * col["L_clear"]
+                + self.path_collision_loss_weight * col["L_path"]
+            )
 
         if self.add_social_collision_loss and neighbor_data is not None and neighbor_mask is not None:
             social_col = compute_social_collision_loss(
@@ -1232,6 +1235,28 @@ class CSDI_SocialFusionScenmap(CSDI_base):
                 reduction="mean",
             )
             loss = loss + self.social_collision_loss_weight * social_col["loss"]
+
+        if not hasattr(self, "_loss_log_counter"):
+            self._loss_log_counter = 0
+        if is_train == 1 and self._loss_log_counter % 100 == 0:
+            obstacle_loss = col["L_obs"] if self.add_collision_loss and sdf is not None else loss.new_zeros(())
+            clearance_loss = col["L_clear"] if self.add_collision_loss and sdf is not None else loss.new_zeros(())
+            path_loss = col["L_path"] if self.add_collision_loss and sdf is not None else loss.new_zeros(())
+            social_loss = social_col["L_social"] if self.add_social_collision_loss and neighbor_data is not None and neighbor_mask is not None else loss.new_zeros(())
+            print(
+                "[loss] diffusion_loss={:.6g} obstacle_loss={:.6g} "
+                "weighted_obstacle_loss={:.6g} clearance_loss={:.6g} "
+                "path_collision_loss={:.6g} social_loss={:.6g} total_loss={:.6g}".format(
+                    float(((residual ** 2).sum() / num_eval).detach()),
+                    float(obstacle_loss.detach()),
+                    float((self.collision_loss_weight * obstacle_loss).detach()),
+                    float(clearance_loss.detach()),
+                    float(path_loss.detach()),
+                    float(social_loss.detach()),
+                    float(loss.detach()),
+                )
+            )
+        self._loss_log_counter += 1
         return loss
 
     def calc_loss_valid(

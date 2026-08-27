@@ -81,7 +81,7 @@ if '${VARIANT}' == 'baseline':
     cfg['dataset']['missing_strategy'] = 'random'
     cfg['dataset']['missing_ratio'] = 0.5
 else:
-    cfg['dataset']['missing_strategy'] = 'end'
+    cfg['dataset']['missing_strategy'] = 'know_first'
     cfg['dataset']['missing_ratio'] = 0.5
 
 cfg.setdefault('train', {})
@@ -98,7 +98,7 @@ cfg.setdefault('model', {})
 if '${VARIANT}' == 'baseline':
     cfg['model']['target_strategy'] = 'random'
 else:
-    cfg['model']['target_strategy'] = 'two_ends'
+    cfg['model']['target_strategy'] = 'know_first'
 
 cfg['model']['scene_goal_channels'] = 5
 cfg['model']['socialemb'] = 64

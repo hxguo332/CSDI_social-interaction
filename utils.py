@@ -397,10 +397,10 @@ class CollisionEvaluator:
     """
 
     def __init__(self, scenmap_scale=10):
-        self.total_collisions = 0
+        self.total_collisions = {"obstacle": 0, "social": 0, "any": 0}
         self.total_paths = 0
-
-        self.invalid_rate_all = []
+        self.invalid_steps = {"obstacle": 0, "social": 0, "any": 0}
+        self.total_steps = 0
 
         self.scenmap_scale = scenmap_scale
 
@@ -485,8 +485,8 @@ class CollisionEvaluator:
         batch_indices = torch.arange(batch_size, device=samples_batch.device).view(-1, 1).expand(-1, sample_length)
 
         # Collisions against obstacle mask under eval points only.
-        collision = collision_mask[batch_indices, y, x] & valid_eval
-        collision = collision | collision_position
+        obstacle_collision = (collision_mask[batch_indices, y, x] & valid_eval) | collision_position
+        social_collision = torch.zeros_like(obstacle_collision)
 
         if neighbor_data is not None and neighbor_mask is not None:
             if not isinstance(neighbor_data, torch.Tensor):
@@ -496,26 +496,18 @@ class CollisionEvaluator:
             neighbor_data = neighbor_data.to(samples_batch.device).float()
             neighbor_mask = neighbor_mask.to(samples_batch.device).float()
             social_dist = torch.linalg.norm(samples_batch.unsqueeze(1) - neighbor_data, dim=-1)
-            social_collision = (social_dist < social_margin) & (neighbor_mask > 0)
-            social_collision = social_collision.any(dim=1) & (eval_points[..., 0] > 0)
-            collision = collision | social_collision
+            social_collision = ((social_dist < social_margin) & (neighbor_mask > 0)).any(dim=1) & valid_eval
 
-        # Calculate collision rate for the batch, calculated by each sample
-        batch_collisions = torch.any(collision, dim=1).sum().item()  # Number of paths with at least one collision
-
-        # Calculate invalid rate for the batch
-        batch_invalid_steps = collision.sum(dim=-1)  # Total number of invalid steps
-        batch_total_steps = eval_points[...,0].sum(dim=-1)  # Total number of steps under eval_points
-
-        batch_invalid_rate = batch_invalid_steps / batch_total_steps  # Invalid rate for each path
-        # Handle NaN values
-        batch_invalid_rate[batch_total_steps == 0] = 0.0  # Set invalid rate to 0 if total steps is 0
-        batch_invalid_rate = batch_invalid_rate.tolist()  # Convert to list for easier handling
-
-        # Update the totals
-        self.invalid_rate_all.extend(batch_invalid_rate)
-        self.total_collisions += batch_collisions
+        collision_masks = {
+            "obstacle": obstacle_collision,
+            "social": social_collision,
+            "any": obstacle_collision | social_collision,
+        }
+        for name, collision in collision_masks.items():
+            self.total_collisions[name] += torch.any(collision, dim=1).sum().item()
+            self.invalid_steps[name] += collision.sum().item()
         self.total_paths += batch_size
+        self.total_steps += valid_eval.sum().item()
 
     def compute_metrics(self):
         """
@@ -526,11 +518,14 @@ class CollisionEvaluator:
             invalid_rate (float): Average invalid rate across all batches.
         """
         # Calculate the average collision rate across all batches
-        collision_rate = self.total_collisions / self.total_paths if self.total_paths > 0 else 0.0
-
-        # Calculate the average invalid rate across all batches
-        invalid_rate = np.mean(self.invalid_rate_all) if len(self.invalid_rate_all) > 0 else 0.0
-        return collision_rate, invalid_rate
+        return {
+            f"{name}_{metric}": value / denominator if denominator else 0.0
+            for name in ("obstacle", "social", "any")
+            for metric, value, denominator in (
+                ("collision_rate", self.total_collisions[name], self.total_paths),
+                ("invalid_rate", self.invalid_steps[name], self.total_steps),
+            )
+        }
 
 
 def save_evaluation_metrics(foldername, nsample, metrics_dict, mode=None, tag=None):
@@ -577,9 +572,9 @@ def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldernam
         model.eval()
         mse_total, mae_total, evalpoints_total = 0, 0, 0
 
-        collision_evaluator = None
-        if eval_collision:
-            collision_evaluator = CollisionEvaluator()
+        collision_evaluators = {
+            name: CollisionEvaluator() for name in ("best_of_30", "median", "expected")
+        } if eval_collision else None
 
         all_target, all_observed_point, all_observed_time = [], [], []
         all_evalpoint, all_generated_samples = [], []
@@ -640,7 +635,7 @@ def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldernam
                     social_margin=getattr(model, "social_margin", 0.04),
                 )
 
-                if collision_evaluator is not None:
+                if collision_evaluators is not None:
                     # Always use scen_map from batch (raw or original). Do not use scen_map_out returned by the model,
                     # as it is normalized and unsuitable for collision evaluation.
                     scen_map_tensor = None
@@ -677,16 +672,34 @@ def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldernam
                         neighbor_data = test_batch.get("neighbor_data", None) if isinstance(test_batch, dict) else None
                         neighbor_mask = test_batch.get("neighbor_mask", None) if isinstance(test_batch, dict) else None
                         social_margin = getattr(model, "social_margin", 0.04)
-                        collision_evaluator.update(
-                            samples_median,
-                            scen_map_tensor,
-                            eval_points,
-                            scen_maps_scale_tensor,
-                            mode=ce_mode,
-                            neighbor_data=neighbor_data,
-                            neighbor_mask=neighbor_mask,
-                            social_margin=social_margin,
-                        )
+                        median_trajectory = samples.median(dim=1).values
+                        _, S, _, _ = samples.shape
+                        trajectories = {
+                            "best_of_30": samples_median,
+                            "median": median_trajectory,
+                        }
+                        for metric_name, trajectory in trajectories.items():
+                            collision_evaluators[metric_name].update(
+                                trajectory,
+                                scen_map_tensor,
+                                eval_points,
+                                scen_maps_scale_tensor,
+                                mode=ce_mode,
+                                neighbor_data=neighbor_data,
+                                neighbor_mask=neighbor_mask,
+                                social_margin=social_margin,
+                            )
+                        for sample_idx in range(S):
+                            collision_evaluators["expected"].update(
+                                samples[:, sample_idx],
+                                scen_map_tensor,
+                                eval_points,
+                                scen_maps_scale_tensor,
+                                mode=ce_mode,
+                                neighbor_data=neighbor_data,
+                                neighbor_mask=neighbor_mask,
+                                social_margin=social_margin,
+                            )
 
                 # Append results to the respective lists
                 all_target.append(c_target)
@@ -756,17 +769,23 @@ def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldernam
         # Save evaluation metrics
         RMSE = np.sqrt(mse_total / evalpoints_total)
         MAE = mae_total / evalpoints_total
-        if collision_evaluator is not None:
-            collision_rate, invalid_rate = collision_evaluator.compute_metrics()
-            print("Collision Rate:", collision_rate)
-            print("Invalid Rate:", invalid_rate)
+        if collision_evaluators is not None:
+            collision_metrics = {
+                f"{selection}_{metric}": value
+                for selection, evaluator in collision_evaluators.items()
+                for metric, value in evaluator.compute_metrics().items()
+            }
+            for key, value in collision_metrics.items():
+                print(f"{key}: {value}")
             metrics_dict = {
                 "RMSE": RMSE,
                 "MAE": MAE,
                 "CRPS": CRPS,
                 "CRPS_sum": CRPS_sum,
-                "Collision Rate": collision_rate,
-                "Invalid Rate": invalid_rate,
+                # Backward-compatible fields use the original best-of-30 any-collision definition.
+                "Collision Rate": collision_metrics["best_of_30_any_collision_rate"],
+                "Invalid Rate": collision_metrics["best_of_30_any_invalid_rate"],
+                **collision_metrics,
             }
         else:
             metrics_dict = {

@@ -1,12 +1,14 @@
 import argparse
+import random
 import torch
 import datetime
 import json
 import yaml
 import os
+import numpy as np
 
 from main_model import CSDI_SimulationScenmap, CSDI_SocialFusionScenmap
-from dataset_simulation import get_dataloader, get_social_dataloader
+from dataset_simulation import get_social_dataloader
 from utils import train, evaluate
 
 
@@ -35,6 +37,11 @@ def _reset_ablation_flags(model_cfg):
     model_cfg.setdefault("social_hidden", 64)
     model_cfg.setdefault("social_hidden_dim", 64)
     model_cfg.setdefault("fusionemb", model_cfg.get("scenmapemb", 256))
+    model_cfg.setdefault("obstacle_clearance_weight", 1.0)
+    model_cfg.setdefault("obstacle_clearance_margin", 0.01)
+    model_cfg.setdefault("clearance_loss_weight", model_cfg.get("collision_loss_weight", 0.02))
+    model_cfg.setdefault("path_collision_loss_weight", model_cfg.get("collision_loss_weight", 0.02))
+    model_cfg.setdefault("social_margin", 0.003)
 
 
 def configure_variant_legacy(config, variant):
@@ -50,7 +57,7 @@ def configure_variant_legacy(config, variant):
     model_cfg = config.setdefault("model", {})
     _reset_ablation_flags(model_cfg)
 
-    if variant == "baseline":
+    if variant in {"baseline", "task"}:
         return "base"
 
     if variant == "goal":
@@ -239,6 +246,11 @@ if __name__ == "__main__":
     args = parser.parse_args()
     print(args)
 
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    torch.cuda.manual_seed_all(args.seed)
+
     path = "config/" + args.config
     with open(path, "r") as f:
         config = yaml.safe_load(f)
@@ -266,45 +278,40 @@ if __name__ == "__main__":
 
     if args.force_random_target_know_first:
         config["model"]["target_strategy"] = "random"
-        config["dataset"]["missing_strategy"] = "end"
+        config["dataset"]["missing_strategy"] = "know_first"
         config["dataset"]["missing_ratio"] = 0.5
 
     print(json.dumps(config, indent=4))
 
     foldername = args.modelfolder or save_config(config, args)
 
-    if model_family == "base":
-        train_loader, valid_loader, test_loader = get_dataloader(
-            scenarios=config["dataset"]["scenarios"],
-            data_length=args.data_length,
-            seed=args.seed,
-            batch_size=config["train"]["batch_size"],
-            zero_based_position=True,
-            load_scenario_map=True,
-            missing_strategy=config["dataset"].get("missing_strategy", "end"),
-            missing_ratio=config["dataset"].get("missing_ratio", 0.5),
-        )
+    # Every variant uses the same dataset so collision evaluation always has
+    # identical obstacle and neighbor information. Base models simply ignore
+    # the additional social fields.
+    train_loader, valid_loader, test_loader = get_social_dataloader(
+        scenarios=config["dataset"]["scenarios"],
+        data_length=args.data_length,
+        seed=args.seed,
+        batch_size=config["train"]["batch_size"],
+        zero_based_position=True,
+        load_scenario_map=True,
+        max_neighbors=args.max_neighbors,
+        gen_sdf=config["model"].get("add_collision_loss", False),
+        missing_strategy=config["dataset"].get("missing_strategy", "know_first"),
+        missing_ratio=config["dataset"].get("missing_ratio", 0.5),
+    )
 
+    if model_family == "base":
         model = CSDI_SimulationScenmap(config, args.device).to(args.device)
 
     elif model_family == "social":
-        train_loader, valid_loader, test_loader = get_social_dataloader(
-            scenarios=config["dataset"]["scenarios"],
-            data_length=args.data_length,
-            seed=args.seed,
-            batch_size=config["train"]["batch_size"],
-            zero_based_position=True,
-            load_scenario_map=True,
-            max_neighbors=args.max_neighbors,
-            gen_sdf=config["model"].get("add_collision_loss", False),
-            missing_strategy=config["dataset"].get("missing_strategy", "end"),
-            missing_ratio=config["dataset"].get("missing_ratio", 0.5),
-        )
-
         model = CSDI_SocialFusionScenmap(config, args.device).to(args.device)
-
     else:
         raise ValueError(f"Unknown model family: {model_family}")
+
+    # Collision evaluation must use the same social radius for every variant,
+    # including the base model which does not consume neighbor features.
+    model.social_margin = float(config["model"]["social_margin"])
 
     if args.modelfolder == "":
         train(

@@ -49,6 +49,7 @@ def compute_collision_loss(
           - "loss": total geometric loss (scalar or tensor depending on reduction)
           - "L_obs": obstacle penetration component
           - "L_clear": clearance (margin) component
+          - "L_path": worst-point path collision component
           - "collision_rate": ratio of points with d < 0 within masked steps
           - "mean_clearance": mean positive distance to obstacles within masked steps
     """
@@ -73,15 +74,18 @@ def compute_collision_loss(
         #print(f"Denominator for mean reduction: {denom.item()}")
         L_obs = (L_obs_pt * mask).sum() / denom
         L_clear = (L_clear_pt * mask).sum() / denom
+        path_penalty = (L_obs_pt * mask).max(dim=1).values.mean()
         loss = w_obs * L_obs + w_clear * L_clear
     elif reduction == "sum":
         L_obs = (L_obs_pt * mask).sum()
         L_clear = (L_clear_pt * mask).sum()
+        path_penalty = (L_obs_pt * mask).max(dim=1).values.sum()
         loss = w_obs * L_obs + w_clear * L_clear
     elif reduction == "none":
         # Return element-wise tensors (mask applied)
         L_obs = L_obs_pt * mask
         L_clear = L_clear_pt * mask
+        path_penalty = L_obs_pt * mask
         loss = w_obs * L_obs + w_clear * L_clear
     else:
         raise ValueError(f"Invalid reduction mode: {reduction}")
@@ -95,6 +99,7 @@ def compute_collision_loss(
         "loss": loss,
         "L_obs": L_obs,
         "L_clear": L_clear,
+        "L_path": path_penalty,
     #    "collision_rate": collision_rate.detach() if detach_stats else collision_rate,
     #    "mean_clearance": mean_clearance.detach() if detach_stats else mean_clearance
     }

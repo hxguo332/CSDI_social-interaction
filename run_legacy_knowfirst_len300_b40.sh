@@ -1,16 +1,17 @@
 #!/bin/bash
-#SBATCH -A naiss2025-5-659
-#SBATCH -p alvis
-#SBATCH --gpus-per-node=A100:1
-#SBATCH -t 24:00:00
+#SBATCH -A naiss2025-5-659-gpu
+#SBATCH -p gpu
+#SBATCH --gpus=1
+#SBATCH --cpus-per-task=16
+#SBATCH -t 48:00:00
 #SBATCH --array=0-3
 #SBATCH -o ./srun_logs/legacy_knowfirst_len300_b40_%A_%a.out
 #SBATCH -e ./srun_logs/legacy_knowfirst_len300_b40_%A_%a.err
 
 set -euo pipefail
 
-PROJECT_DIR=/cephyr/users/${USER}/Alvis/CSDI_social-interaction
-PYTHON=/cephyr/users/${USER}/Alvis/csdi_env/bin/python
+PROJECT_DIR=/home/${USER}/CSDI_social-interaction
+PYTHON=/home/${USER}/csdi_env/bin/python
 BASE_CONFIG=config/base_scenmap.yaml
 
 DATA_LENGTH=300
@@ -20,8 +21,12 @@ ITR_PER_EPOCH=500
 BATCH_SIZE=40
 MAX_NEIGHBORS=8
 
-COLLISION_WEIGHT=0.02
+POINTWISE_COLLISION_WEIGHT=0.02
+CLEARANCE_LOSS_WEIGHT=0.02
+PATH_COLLISION_LOSS_WEIGHT=0.02
 SOCIAL_COLLISION_WEIGHT=0.02
+OBSTACLE_CLEARANCE_WEIGHT=1.0
+OBSTACLE_CLEARANCE_MARGIN=0.01
 SOCIAL_MARGIN=0.003
 
 SCENARIOS=("1-1" "2-3" "3-1" "4-1")
@@ -30,13 +35,16 @@ VARIANTS=("task" "goal" "social" "fusion" "obs_loss" "full")
 SCENARIO=${SCENARIOS[$SLURM_ARRAY_TASK_ID]}
 
 module purge
-module load GCC/13.3.0 Python/3.12.3-GCCcore-13.3.0
+module load GPU/buildenv-nvhpc/25.9-cu13.0
 
+[[ -x "$PYTHON" ]] || { echo "Missing GPU Python environment: $PYTHON" >&2; exit 1; }
 cd "$PROJECT_DIR"
+[[ -d data/simulation_data ]] || { echo "Missing dataset: $PROJECT_DIR/data/simulation_data" >&2; exit 1; }
 mkdir -p srun_logs
 mkdir -p config/generated_ablation
 
-export PYTHONPATH=/cephyr/users/${USER}/Alvis
+export PYTHONPATH=/home/${USER}
+"$PYTHON" -c "import torch; assert torch.cuda.is_available(), 'CUDA is unavailable'; print(torch.cuda.get_device_name(0))"
 
 echo "============================================================"
 echo "Legacy ablation: know-first target + know-first missing | len300 b40"
@@ -68,7 +76,7 @@ with open(base_cfg, 'r') as f:
 
 cfg.setdefault('dataset', {})
 cfg['dataset']['scenarios'] = ['${SCENARIO}']
-cfg['dataset']['missing_strategy'] = 'end'
+cfg['dataset']['missing_strategy'] = 'know_first'
 cfg['dataset']['missing_ratio'] = 0.5
 
 cfg.setdefault('train', {})
@@ -82,14 +90,18 @@ cfg['valid']['batch_size'] = ${BATCH_SIZE}
 cfg['test']['batch_size'] = ${BATCH_SIZE}
 
 cfg.setdefault('model', {})
-cfg['model']['target_strategy'] = 'two_ends'
+cfg['model']['target_strategy'] = 'know_first'
 cfg['model']['scene_goal_channels'] = 5
 cfg['model']['socialemb'] = 64
 cfg['model']['social_hidden'] = 64
 cfg['model']['social_hidden_dim'] = 64
 cfg['model']['fusionemb'] = cfg['model'].get('scenmapemb', 256)
-cfg['model']['collision_loss_weight'] = ${COLLISION_WEIGHT}
+cfg['model']['collision_loss_weight'] = ${POINTWISE_COLLISION_WEIGHT}
+cfg['model']['clearance_loss_weight'] = ${CLEARANCE_LOSS_WEIGHT}
+cfg['model']['path_collision_loss_weight'] = ${PATH_COLLISION_LOSS_WEIGHT}
 cfg['model']['social_collision_loss_weight'] = ${SOCIAL_COLLISION_WEIGHT}
+cfg['model']['obstacle_clearance_weight'] = ${OBSTACLE_CLEARANCE_WEIGHT}
+cfg['model']['obstacle_clearance_margin'] = ${OBSTACLE_CLEARANCE_MARGIN}
 cfg['model']['social_margin'] = ${SOCIAL_MARGIN}
 
 out_cfg.parent.mkdir(parents=True, exist_ok=True)

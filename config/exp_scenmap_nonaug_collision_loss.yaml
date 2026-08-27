@@ -34,7 +34,7 @@ model:
   timeemb: 128
   featureemb: 16
   scenmapemb: 256
-  target_strategy: "two_ends"
+  target_strategy: "know_first"
   add_collision_loss: true
   map_encoder:
     grid_size: 7

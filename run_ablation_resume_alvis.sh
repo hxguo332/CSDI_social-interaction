@@ -142,7 +142,7 @@ cfg.setdefault('dataset', {})
 
 cfg['dataset']['scenarios'] = ['${SCENARIO}']
 
-cfg['dataset']['missing_strategy'] = 'end'
+cfg['dataset']['missing_strategy'] = 'know_first'
 
 cfg['dataset']['missing_ratio'] = 0.5
 
@@ -170,7 +170,7 @@ cfg['test']['batch_size'] = ${BATCH_SIZE}
 
 cfg.setdefault('model', {})
 
-cfg['model']['target_strategy'] = 'two_ends'
+cfg['model']['target_strategy'] = 'know_first'
 
 cfg['model']['scene_goal_channels'] = 5
 

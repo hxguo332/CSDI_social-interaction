@@ -9,7 +9,7 @@ from sdf import generate_sdf
 
 
 class Simulation_Dataset(Dataset):
-    def __init__(self, data_length, scenarios=None, data_folder=None, subset_split_seed=1, mode="train", missing_strategy="all_but_two_end", missing_ratio=0.1, load_scenario_map=False, zero_based_position=True, scen_map_scale=10):
+    def __init__(self, data_length, scenarios=None, data_folder=None, subset_split_seed=1, mode="train", missing_strategy="know_first", missing_ratio=0.5, load_scenario_map=False, zero_based_position=True, scen_map_scale=10):
         """
         Simulation_Dataset is a dataset class for loading and processing simulation data.
         Args:
@@ -19,7 +19,7 @@ class Simulation_Dataset(Dataset):
             subset_split_seed (int): The seed for splitting the dataset into subsets (train, valid, test).
             mode (str): The mode of the dataset. Can be "train", "valid", "test", or "unit_test".
             missing_strategy (str): The strategy to create ground truth masks for missing data.
-                Options: "random", "middle", "all_but_two_end", "end".
+                Options: "random", "know_first".
             missing_ratio (float): The ratio of missing values to use when applying the missing strategy.
             load_scenario_map (bool): Whether to load the scenario map for each scenario.
             zero_based_position (bool): If True, positions will be adjusted to be zero-based based on scen_map_info boundaries.
@@ -106,17 +106,12 @@ class Simulation_Dataset(Dataset):
                     missing_indices.extend([2 * t, 2 * t + 1])
             else:
                 missing_indices = []
-        elif missing_strategy == "middle":
-            start = int(len(obs_indices) * (1 - missing_ratio) // 2)
-            end = int(len(obs_indices) * (1 + missing_ratio) // 2)
-            missing_indices = obs_indices[start:end]
-        elif missing_strategy == "all_but_two_end":
-            missing_indices = obs_indices[2:-2] # there are x,y in the two end
-        elif missing_strategy == "end":
-            start = int(len(obs_indices) * (1 - missing_ratio) // 2) * 2
-            missing_indices = obs_indices[start:] # keep the index to an even number
+        elif missing_strategy == "know_first":
+            valid_steps = np.where(observed_masks[:, 0] & observed_masks[:, 1])[0]
+            first_missing = int(len(valid_steps) * (1 - missing_ratio))
+            missing_indices = [axis for t in valid_steps[first_missing:] for axis in (2 * t, 2 * t + 1)]
         else:
-            raise ValueError(f"Missing strategy {missing_strategy} is not available. Please choose from ['random','middle','all_but_two_end','end']")
+            raise ValueError(f"Missing strategy {missing_strategy} is not available. Choose 'random' or 'know_first'.")
         masks[missing_indices] = False
         gt_masks = masks.reshape(observed_masks.shape)
 
@@ -291,8 +286,8 @@ class SocialSimulation_Dataset(Simulation_Dataset):
         data_folder=None,
         subset_split_seed=1,
         mode="train",
-        missing_strategy="all_but_two_end",
-        missing_ratio=0.1,
+        missing_strategy="know_first",
+        missing_ratio=0.5,
         load_scenario_map=True,
         zero_based_position=True,
         scen_map_scale=10,
@@ -463,7 +458,7 @@ class SocialSimulation_Dataset(Simulation_Dataset):
 def get_social_dataloader(
     data_length, seed, scenarios=None, batch_size=8, 
     load_scenario_map=True, zero_based_position=True, # Design uses zero_based internal processing
-    max_neighbors=8, gen_sdf=False, missing_strategy="end", missing_ratio=0.5,
+    max_neighbors=8, gen_sdf=False, missing_strategy="know_first", missing_ratio=0.5,
 ):
     dataset = SocialSimulation_Dataset(
         data_length, subset_split_seed=seed, scenarios=scenarios, mode="train",
@@ -488,7 +483,7 @@ def get_social_dataloader(
     test_loader = ScenarioBatchDataLoader(test_dataset, batch_size=batch_size, shuffle=False)
     return train_loader, valid_loader, test_loader
 
-def get_dataloader(data_length, seed, scenarios=None, batch_size=8, load_scenario_map=False, zero_based_position=False, missing_strategy="all_but_two_end", missing_ratio=0.1):
+def get_dataloader(data_length, seed, scenarios=None, batch_size=8, load_scenario_map=False, zero_based_position=False, missing_strategy="know_first", missing_ratio=0.5):
     dataset = Simulation_Dataset(
         data_length, subset_split_seed=seed, scenarios=scenarios, 
         mode='train', load_scenario_map=load_scenario_map, 

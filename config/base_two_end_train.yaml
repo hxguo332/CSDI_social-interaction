@@ -23,4 +23,4 @@ model:
   is_unconditional: 0
   timeemb: 128
   featureemb: 16
-  target_strategy: "two_ends"
+  target_strategy: "know_first"

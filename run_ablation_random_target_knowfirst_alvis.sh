@@ -72,7 +72,7 @@ cfg['dataset']['scenarios'] = ['${SCENARIO}']
 
 # Random-target + know-first comparison:
 # The model target strategy is random, while the trajectory completion task is future-half prediction.
-cfg['dataset']['missing_strategy'] = 'end'
+cfg['dataset']['missing_strategy'] = 'know_first'
 cfg['dataset']['missing_ratio'] = 0.5
 
 cfg.setdefault('train', {})

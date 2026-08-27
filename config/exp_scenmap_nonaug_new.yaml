@@ -34,7 +34,7 @@ model:
   timeemb: 128
   featureemb: 16
   scenmapemb: 256
-  target_strategy: "two_ends"
+  target_strategy: "know_first"
   map_encoder:
     grid_size: 7
     finetune_from: "layer4"
