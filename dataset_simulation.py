@@ -430,29 +430,31 @@ class SocialSimulation_Dataset(Simulation_Dataset):
 
     def _compute_conflict_features(self, ego_norm, ego_mask, neighbor_data, neighbor_mask):
         valid_ego = ego_mask[:, 0] & ego_mask[:, 1]
-        if neighbor_mask.sum() == 0 or valid_ego.sum() < 2:
-            return np.array([1.0, 1.0, 0.0], dtype=np.float32)
-
-        # uses internally aligned [0,1] top=0 visual coordinates
+        # Return [time, 3], preserving the interaction state at each step:
+        # minimum distance, minimum TTC, and mean heading difference.
         ego_vel = np.diff(ego_norm, axis=0, prepend=ego_norm[:1])
-        min_dist, min_ttc = 1.0, 1.0
-        heading_diffs = []
-        for n in range(neighbor_data.shape[0]):
-            valid = (neighbor_mask[n] > 0) & valid_ego
-            if valid.sum() == 0: continue
-            rel = neighbor_data[n] - ego_norm
-            dist = np.linalg.norm(rel[valid], axis=-1)
-            min_dist = min(min_dist, float(dist.min()))
-            neigh_vel = np.diff(neighbor_data[n], axis=0, prepend=neighbor_data[n, :1])
-            rel_vel = ego_vel - neigh_vel
-            closing = -(rel * rel_vel).sum(axis=-1) / (np.linalg.norm(rel, axis=-1) + 1e-6)
-            ttc = np.where(closing > 1e-6, np.linalg.norm(rel, axis=-1) / (closing + 1e-6), 1.0)
-            min_ttc = min(min_ttc, float(np.clip(ttc[valid].min(), 0.0, 1.0)))
-            ev = ego_vel[valid]; nv = neigh_vel[valid]
-            cos = (ev * nv).sum(axis=-1) / (np.linalg.norm(ev, axis=-1) * np.linalg.norm(nv, axis=-1) + 1e-6)
-            heading_diffs.append(np.arccos(np.clip(cos, -1.0, 1.0)) / np.pi)
-        mean_heading = float(np.concatenate(heading_diffs).mean()) if heading_diffs else 0.0
-        return np.array([min_dist, min_ttc, mean_heading], dtype=np.float32)
+        features = np.ones((ego_norm.shape[0], 3), dtype=np.float32)
+        features[:, 2] = 0.0
+        for t in range(ego_norm.shape[0]):
+            valid = (neighbor_mask[:, t] > 0) & valid_ego[t]
+            if not np.any(valid):
+                continue
+            rel = neighbor_data[valid, t] - ego_norm[t]
+            dist = np.linalg.norm(rel, axis=-1)
+            neigh_vel = np.diff(neighbor_data[valid], axis=1, prepend=neighbor_data[valid, :1])[:, 0]
+            rel_vel = ego_vel[t] - neigh_vel
+            closing = -(rel * rel_vel).sum(axis=-1) / (dist + 1e-6)
+            ttc = np.where(closing > 1e-6, dist / (closing + 1e-6), 1.0)
+            ev = np.broadcast_to(ego_vel[t], neigh_vel.shape)
+            cos = (ev * neigh_vel).sum(axis=-1) / (
+                np.linalg.norm(ev, axis=-1) * np.linalg.norm(neigh_vel, axis=-1) + 1e-6
+            )
+            features[t] = [
+                float(dist.min()),
+                float(np.clip(ttc, 0.0, 1.0).min()),
+                float((np.arccos(np.clip(cos, -1.0, 1.0)) / np.pi).mean()),
+            ]
+        return features
 
 
 def get_social_dataloader(

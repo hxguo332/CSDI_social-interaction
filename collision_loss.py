@@ -112,6 +112,7 @@ def compute_social_collision_loss(
     neighbor_mask: torch.Tensor,
     *,
     margin: float = 0.04,
+    path_weight: float = 1.0,
     reduction: str = "mean",
 ) -> Dict[str, torch.Tensor]:
     """
@@ -127,25 +128,49 @@ def compute_social_collision_loss(
     assert neighbor_mask.shape[:3] == neighbor_xy.shape[:3]
 
     rel = pred_xy.unsqueeze(1) - neighbor_xy
-    dist = torch.linalg.norm(rel, dim=-1)
-    valid = neighbor_mask.float() * target_time_mask.unsqueeze(1).float()
-    point_loss = F.relu(margin - dist) ** 2 * valid
-    denom = valid.sum().clamp_min(1e-8)
+    dist = torch.linalg.norm(rel, dim=-1)  # [B, N, L]
+    valid_neighbors = neighbor_mask.float() > 0
+    valid_time = target_time_mask.float() > 0
+    valid = valid_neighbors & valid_time.unsqueeze(1)
+
+    # Use the closest valid neighbor at each time step. This preserves the
+    # temporal safety signal instead of diluting it over all far-away agents.
+    inf = torch.full_like(dist, float("inf"))
+    nearest_dist = torch.where(valid, dist, inf).min(dim=1).values  # [B, L]
+    has_neighbor = torch.isfinite(nearest_dist)
+    nearest_dist = torch.where(has_neighbor, nearest_dist, torch.full_like(nearest_dist, margin))
+    active_time = valid_time & has_neighbor
+
+    # Normalize by the margin so a direct overlap has O(1) point loss.
+    point_loss = (F.relu(margin - nearest_dist) / max(float(margin), 1e-8)) ** 2
+    point_loss = point_loss * active_time.float()
+    denom = active_time.float().sum().clamp_min(1.0)
 
     if reduction == "mean":
-        loss = point_loss.sum() / denom
+        point_mean = point_loss.sum() / denom
+        # Differentiable trajectory-level penalty: any severe near-collision
+        # raises the whole path loss, matching path-level collision metrics.
+        path_loss = (1.0 - torch.exp(-point_loss.sum(dim=1))).mean()
+        loss = point_mean + float(path_weight) * path_loss
     elif reduction == "sum":
-        loss = point_loss.sum()
+        point_mean = point_loss.sum()
+        path_loss = 1.0 - torch.exp(-point_loss.sum(dim=1))
+        loss = point_mean + float(path_weight) * path_loss.sum()
     elif reduction == "none":
+        point_mean = point_loss
+        path_loss = 1.0 - torch.exp(-point_loss.sum(dim=1))
         loss = point_loss
     else:
         raise ValueError(f"Invalid reduction mode: {reduction}")
 
     with torch.no_grad():
-        collision_rate = (((dist < margin).float() * valid).sum() / denom).detach()
+        collision_rate = (((dist < margin) & valid).any(dim=1).float() * valid_time).sum() / valid_time.sum().clamp_min(1.0)
+        collision_rate = collision_rate.detach()
 
     return {
         "loss": loss,
         "L_social": loss,
+        "L_social_point": point_mean,
+        "L_path": path_loss,
         "social_collision_rate": collision_rate,
     }

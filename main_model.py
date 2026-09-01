@@ -926,9 +926,11 @@ class SocialInteractionEncoder(nn.Module):
         B, N, L, H = feat.shape
         enc, _ = self.temporal_gru(feat.reshape(B * N, L, H))
         enc = enc.reshape(B, N, L, H)
-        denom = neighbor_mask.sum(dim=(1, 2), keepdim=False).clamp_min(1.0).unsqueeze(-1)
-        pooled = (enc * neighbor_mask.unsqueeze(-1)).sum(dim=(1, 2)) / denom
-        return self.out(pooled)
+        # Keep a feature for every timestep.  Only the neighbor dimension is
+        # pooled, so the diffusion model can react to changing interactions.
+        denom = neighbor_mask.sum(dim=1).clamp_min(1.0).unsqueeze(-1)
+        pooled = (enc * neighbor_mask.unsqueeze(-1)).sum(dim=1) / denom
+        return self.out(pooled)  # [B, L, social_dim]
 
 
 class GameAwareFusion(nn.Module):
@@ -944,6 +946,12 @@ class GameAwareFusion(nn.Module):
         )
 
     def forward(self, base_embed, social_embed, conflict_features):
+        if base_embed.dim() == 2:
+            base_embed = base_embed.unsqueeze(1)
+        if social_embed.dim() == 2:
+            social_embed = social_embed.unsqueeze(1).expand(-1, base_embed.size(1), -1)
+        if conflict_features.dim() == 2:
+            conflict_features = conflict_features.unsqueeze(1).expand(-1, base_embed.size(1), -1)
         base = self.base_proj(base_embed)
         social = self.social_proj(social_embed)
         gate = self.gate(torch.cat([base, social, conflict_features], dim=-1))
@@ -976,7 +984,7 @@ class CSDI_SocialFusionScenmap(CSDI_base):
         self.add_social_collision_loss = model_cfg.get("add_social_collision_loss", True)
         self.enable_goal_guidance = bool(model_cfg.get("enable_goal_guidance", True))
         self.collision_loss_weight = float(model_cfg.get("collision_loss_weight", 0.5))
-        self.social_collision_loss_weight = float(model_cfg.get("social_collision_loss_weight", 0.5))
+        self.social_collision_loss_weight = float(model_cfg.get("social_collision_loss_weight", 0.2))
         self.obstacle_clearance_weight = float(model_cfg.get("obstacle_clearance_weight", 1.0))
         self.obstacle_clearance_margin = float(model_cfg.get("obstacle_clearance_margin", 0.01))
         self.clearance_loss_weight = float(model_cfg.get("clearance_loss_weight", self.collision_loss_weight))
@@ -1108,12 +1116,14 @@ class CSDI_SocialFusionScenmap(CSDI_base):
         if self.enable_social_branch:
             social_embed = self.social_encoder(observed_data, neighbor_data, neighbor_mask)
         else:
-            social_embed = torch.zeros(B, self.social_dim, device=self.device)
+            social_embed = torch.zeros(B, L, self.social_dim, device=self.device)
+
+        base_seq = base_embed.unsqueeze(1).expand(-1, L, -1)
 
         if self.enable_game_fusion:
-            fusion_embed, gate = self.fusion(base_embed, social_embed, conflict_features)
+            fusion_embed, gate = self.fusion(base_seq, social_embed, conflict_features)
         else:
-            base_proj = self.fusion.base_proj(base_embed)
+            base_proj = self.fusion.base_proj(base_seq)
             if self.enable_social_branch:
                 social_proj = self.fusion.social_proj(social_embed)
                 fusion_embed = 0.5 * (base_proj + social_proj)
@@ -1123,7 +1133,7 @@ class CSDI_SocialFusionScenmap(CSDI_base):
                 gate = torch.ones_like(fusion_embed)
         self.last_fusion_gate = gate.detach()
 
-        fusion_embed = fusion_embed.unsqueeze(-1).unsqueeze(-1).expand(-1, -1, K, L)
+        fusion_embed = fusion_embed.permute(0, 2, 1).unsqueeze(2).expand(-1, -1, K, -1)
         side_info = torch.cat([side_info, fusion_embed], dim=1)
 
         scale_embed = self.scale_mlp(scenmap_scales)
@@ -1243,16 +1253,23 @@ class CSDI_SocialFusionScenmap(CSDI_base):
             clearance_loss = col["L_clear"] if self.add_collision_loss and sdf is not None else loss.new_zeros(())
             path_loss = col["L_path"] if self.add_collision_loss and sdf is not None else loss.new_zeros(())
             social_loss = social_col["L_social"] if self.add_social_collision_loss and neighbor_data is not None and neighbor_mask is not None else loss.new_zeros(())
+            social_point_loss = social_col["L_social_point"] if self.add_social_collision_loss and neighbor_data is not None and neighbor_mask is not None else loss.new_zeros(())
+            social_path_loss = social_col["L_path"] if self.add_social_collision_loss and neighbor_data is not None and neighbor_mask is not None else loss.new_zeros(())
             print(
                 "[loss] diffusion_loss={:.6g} obstacle_loss={:.6g} "
                 "weighted_obstacle_loss={:.6g} clearance_loss={:.6g} "
-                "path_collision_loss={:.6g} social_loss={:.6g} total_loss={:.6g}".format(
+                "path_collision_loss={:.6g} social_point_loss={:.6g} "
+                "social_path_collision_loss={:.6g} social_loss={:.6g} "
+                "weighted_social_loss={:.6g} total_loss={:.6g}".format(
                     float(((residual ** 2).sum() / num_eval).detach()),
                     float(obstacle_loss.detach()),
                     float((self.collision_loss_weight * obstacle_loss).detach()),
                     float(clearance_loss.detach()),
                     float(path_loss.detach()),
+                    float(social_point_loss.detach()),
+                    float(social_path_loss.detach()),
                     float(social_loss.detach()),
+                    float((self.social_collision_loss_weight * social_loss).detach()),
                     float(loss.detach()),
                 )
             )
