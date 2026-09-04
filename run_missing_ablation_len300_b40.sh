@@ -29,7 +29,7 @@ mkdir -p srun_logs config/generated_ablation
 [[ -x "$PYTHON" ]] || { echo "Missing Python: $PYTHON" >&2; exit 1; }
 [[ -d data/simulation_data ]] || { echo "Missing dataset" >&2; exit 1; }
 
-CFG="config/generated_ablation/missing_${ORDER}_${STRATEGY}_${SCENARIO}_${VARIANT}_len300_b40.yaml"
+CFG="generated_ablation/missing_${ORDER}_${STRATEGY}_${SCENARIO}_${VARIANT}_len300_b40.yaml"
 "$PYTHON" - <<PY
 import yaml
 from pathlib import Path
