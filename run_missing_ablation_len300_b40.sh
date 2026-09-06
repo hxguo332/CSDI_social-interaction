@@ -4,8 +4,8 @@
 #SBATCH -p gpu
 #SBATCH --gpus=1
 #SBATCH --cpus-per-task=16
-#SBATCH -t 48:00:00
-#SBATCH --array=0-6
+#SBATCH -t 3-00:00:00
+#SBATCH --array=0-1
 #SBATCH -o ./srun_logs/missing_ablation_len300_b40_%A_%a.out
 #SBATCH -e ./srun_logs/missing_ablation_len300_b40_%A_%a.err
 
