@@ -1,11 +1,11 @@
 #!/bin/bash
-#补跑超时且没有完整结果的 7 个实验组。
+# Rerun the five missing after-social-penalty experiment groups.
 #SBATCH -A naiss2025-5-659-gpu
 #SBATCH -p gpu
 #SBATCH --gpus=1
 #SBATCH --cpus-per-task=16
 #SBATCH -t 3-00:00:00
-#SBATCH --array=0-1
+#SBATCH --array=0-4
 #SBATCH -o ./srun_logs/missing_ablation_len300_b40_%A_%a.out
 #SBATCH -e ./srun_logs/missing_ablation_len300_b40_%A_%a.err
 
@@ -14,10 +14,10 @@ PROJECT_DIR=/home/${USER}/CSDI_social-interaction
 PYTHON=/home/${USER}/csdi_env/bin/python
 DATA_LENGTH=300; NSAMPLE=30; EPOCHS=30; ITR_PER_EPOCH=500; BATCH_SIZE=40; MAX_NEIGHBORS=8
 
-ORDERS=(legacy legacy legacy legacy reordered reordered reordered)
-STRATEGIES=(know_first know_first random random random random know_first)
-SCENARIOS=(3-1 4-1 3-1 4-1 3-1 4-1 3-1)
-VARIANTS=(fusion obs_loss obs_loss obs_loss social_loss social_loss social_loss)
+ORDERS=(legacy legacy legacy legacy legacy)
+STRATEGIES=(know_first know_first random random know_first)
+SCENARIOS=(3-1 4-1 3-1 4-1 3-1)
+VARIANTS=(full full full full obs_loss)
 
 ORDER=${ORDERS[$SLURM_ARRAY_TASK_ID]}; STRATEGY=${STRATEGIES[$SLURM_ARRAY_TASK_ID]}
 SCENARIO=${SCENARIOS[$SLURM_ARRAY_TASK_ID]}; VARIANT=${VARIANTS[$SLURM_ARRAY_TASK_ID]}
