@@ -38,7 +38,7 @@ base.setdefault('dataset',{}).update(scenarios=['${SCENARIO}'], missing_strategy
 base.setdefault('train',{}).update(epochs=${EPOCHS}, itr_per_epoch=${ITR_PER_EPOCH}, batch_size=${BATCH_SIZE})
 base.setdefault('valid',{})['batch_size']=${BATCH_SIZE}; base.setdefault('test',{})['batch_size']=${BATCH_SIZE}
 m=base.setdefault('model',{}); m.update(target_strategy='${STRATEGY}', scene_goal_channels=5, socialemb=64, social_hidden=64, social_hidden_dim=64, fusionemb=m.get('scenmapemb',256), social_collision_loss_weight=0.2, social_margin=0.04)
-Path('${CFG}').parent.mkdir(parents=True,exist_ok=True); yaml.safe_dump(base,open('${CFG}','w'),sort_keys=False)
+cfg_path=Path('config')/'${CFG}'; cfg_path.parent.mkdir(parents=True,exist_ok=True); yaml.safe_dump(base,open(cfg_path,'w'),sort_keys=False)
 PY
 
 EXTRA=(); [[ "$STRATEGY" == random ]] && EXTRA+=(--force_random_target_know_first)
