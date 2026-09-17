@@ -37,11 +37,13 @@ def _reset_ablation_flags(model_cfg):
     model_cfg.setdefault("social_hidden", 64)
     model_cfg.setdefault("social_hidden_dim", 64)
     model_cfg.setdefault("fusionemb", model_cfg.get("scenmapemb", 256))
+    model_cfg.setdefault("collision_loss_weight", 0.5)
+    model_cfg.setdefault("social_collision_loss_weight", 0.2)
     model_cfg.setdefault("obstacle_clearance_weight", 1.0)
-    model_cfg.setdefault("obstacle_clearance_margin", 0.01)
-    model_cfg.setdefault("clearance_loss_weight", model_cfg.get("collision_loss_weight", 0.02))
-    model_cfg.setdefault("path_collision_loss_weight", model_cfg.get("collision_loss_weight", 0.02))
-    model_cfg.setdefault("social_margin", 0.003)
+    model_cfg.setdefault("obstacle_clearance_margin", 0.3)
+    model_cfg.setdefault("clearance_loss_weight", 0.1)
+    model_cfg.setdefault("path_collision_loss_weight", 0.2)
+    model_cfg.setdefault("social_margin", 0.5)
 
 
 def configure_variant_legacy(config, variant):

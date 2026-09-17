@@ -986,10 +986,10 @@ class CSDI_SocialFusionScenmap(CSDI_base):
         self.collision_loss_weight = float(model_cfg.get("collision_loss_weight", 0.5))
         self.social_collision_loss_weight = float(model_cfg.get("social_collision_loss_weight", 0.2))
         self.obstacle_clearance_weight = float(model_cfg.get("obstacle_clearance_weight", 1.0))
-        self.obstacle_clearance_margin = float(model_cfg.get("obstacle_clearance_margin", 0.01))
-        self.clearance_loss_weight = float(model_cfg.get("clearance_loss_weight", self.collision_loss_weight))
-        self.path_collision_loss_weight = float(model_cfg.get("path_collision_loss_weight", self.collision_loss_weight))
-        self.social_margin = float(model_cfg.get("social_margin", 0.04))
+        self.obstacle_clearance_margin = float(model_cfg.get("obstacle_clearance_margin", 0.3))
+        self.clearance_loss_weight = float(model_cfg.get("clearance_loss_weight", 0.1))
+        self.path_collision_loss_weight = float(model_cfg.get("path_collision_loss_weight", 0.2))
+        self.social_margin = float(model_cfg.get("social_margin", 0.5))
         self.enable_social_branch = bool(model_cfg.get("enable_social_branch", True))
         self.enable_game_fusion = bool(model_cfg.get("enable_game_fusion", True))
 
@@ -1221,6 +1221,7 @@ class CSDI_SocialFusionScenmap(CSDI_base):
                 w_obs=1,
                 w_clear=self.obstacle_clearance_weight,
                 margin=self.obstacle_clearance_margin,
+                penetration_scale=self.obstacle_clearance_margin,
                 reduction="mean",
             )
             # total_loss = diffusion_loss
@@ -1241,6 +1242,7 @@ class CSDI_SocialFusionScenmap(CSDI_base):
                 ta_time_mask,
                 neighbor_data,
                 neighbor_mask,
+                scenmap_scales,
                 margin=self.social_margin,
                 reduction="mean",
             )

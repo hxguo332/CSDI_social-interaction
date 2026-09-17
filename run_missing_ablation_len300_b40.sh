@@ -37,7 +37,7 @@ base=yaml.safe_load(open('config/base_scenmap.yaml'))
 base.setdefault('dataset',{}).update(scenarios=['${SCENARIO}'], missing_strategy='know_first', missing_ratio=0.5)
 base.setdefault('train',{}).update(epochs=${EPOCHS}, itr_per_epoch=${ITR_PER_EPOCH}, batch_size=${BATCH_SIZE})
 base.setdefault('valid',{})['batch_size']=${BATCH_SIZE}; base.setdefault('test',{})['batch_size']=${BATCH_SIZE}
-m=base.setdefault('model',{}); m.update(target_strategy='${STRATEGY}', scene_goal_channels=5, socialemb=64, social_hidden=64, social_hidden_dim=64, fusionemb=m.get('scenmapemb',256), social_collision_loss_weight=0.2, social_margin=0.04)
+m=base.setdefault('model',{}); m.update(target_strategy='${STRATEGY}', scene_goal_channels=5, socialemb=64, social_hidden=64, social_hidden_dim=64, fusionemb=m.get('scenmapemb',256), social_collision_loss_weight=0.2, social_margin=0.5, obstacle_clearance_margin=0.3)
 cfg_path=Path('config')/'${CFG}'; cfg_path.parent.mkdir(parents=True,exist_ok=True); yaml.safe_dump(base,open(cfg_path,'w'),sort_keys=False)
 PY
 

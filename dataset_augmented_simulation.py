@@ -51,7 +51,10 @@ class AugmentedSimulationDataset(Simulation_Dataset):
         if gen_sdf:
             self.sdf_maps = {}
             for scenario, scen_map in self.scen_map.items():
-                sdf = generate_sdf(scen_map)
+                sdf = generate_sdf(
+                    scen_map,
+                    pixel_size=1.0 / self.scen_map_base_scale,
+                )
                 self.sdf_maps[scenario] = sdf
         if not self.load_scenario_map:
             raise ValueError("AugmentedSimulationDataset requires load_scenario_map=True")

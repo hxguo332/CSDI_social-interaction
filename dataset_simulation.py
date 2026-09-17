@@ -315,7 +315,10 @@ class SocialSimulation_Dataset(Simulation_Dataset):
             if not self.load_scenario_map:
                 raise ValueError("gen_sdf=True requires load_scenario_map=True")
             for scenario in self.scenarios:
-                self.sdf_maps[scenario] = generate_sdf(self.scen_map[scenario])
+                self.sdf_maps[scenario] = generate_sdf(
+                    self.scen_map[scenario],
+                    pixel_size=1.0 / self.scen_map_base_scale,
+                )
 
     def __getitem__(self, index):
         # We reuse __getitem__ but add Social Branch processing

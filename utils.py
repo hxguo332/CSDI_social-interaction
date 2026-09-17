@@ -250,7 +250,7 @@ def select_validity_aware_sample(
     mode: str = "normalized",
     neighbor_data=None,
     neighbor_mask=None,
-    social_margin: float = 0.04,
+    social_margin: float = 0.5,
 ):
     """
     Select one trajectory per case from stochastic diffusion samples.
@@ -306,7 +306,10 @@ def select_validity_aware_sample(
             neighbor_mask = torch.from_numpy(neighbor_mask)
         neighbor_data = neighbor_data.to(samples.device).float()
         neighbor_mask = neighbor_mask.to(samples.device).float()
-        social_dist = torch.linalg.norm(samples.unsqueeze(2) - neighbor_data.unsqueeze(1), dim=-1)
+        rel = samples.unsqueeze(2) - neighbor_data.unsqueeze(1)
+        if mode == "normalized":
+            rel = rel * scenmap_scale[:, None, None, None, :]
+        social_dist = torch.linalg.norm(rel, dim=-1)
         social_collision = (social_dist < social_margin) & (neighbor_mask.unsqueeze(1) > 0)
         social_collision = social_collision.any(dim=2) & valid_t_s
         invalid = invalid | social_collision
@@ -413,7 +416,7 @@ class CollisionEvaluator:
         mode: str = "normalized",
         neighbor_data=None,
         neighbor_mask=None,
-        social_margin: float = 0.04,
+        social_margin: float = 0.5,
     ):
         """
         Update the collision metrics with a new batch of data.
@@ -495,7 +498,10 @@ class CollisionEvaluator:
                 neighbor_mask = torch.from_numpy(neighbor_mask)
             neighbor_data = neighbor_data.to(samples_batch.device).float()
             neighbor_mask = neighbor_mask.to(samples_batch.device).float()
-            social_dist = torch.linalg.norm(samples_batch.unsqueeze(1) - neighbor_data, dim=-1)
+            rel = samples_batch.unsqueeze(1) - neighbor_data
+            if mode == "normalized":
+                rel = rel * scenmap_scale[:, None, None, :]
+            social_dist = torch.linalg.norm(rel, dim=-1)
             social_collision = ((social_dist < social_margin) & (neighbor_mask > 0)).any(dim=1) & valid_eval
 
         collision_masks = {
@@ -632,7 +638,7 @@ def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldernam
                     mode=ce_mode,
                     neighbor_data=neighbor_data_for_selection,
                     neighbor_mask=neighbor_mask_for_selection,
-                    social_margin=getattr(model, "social_margin", 0.04),
+                    social_margin=getattr(model, "social_margin", 0.5),
                 )
 
                 if collision_evaluators is not None:
@@ -671,7 +677,7 @@ def evaluate(model, test_loader, nsample=100, scaler=1, mean_scaler=0, foldernam
                     if (scen_map_tensor is not None) and (scen_maps_scale_tensor is not None):
                         neighbor_data = test_batch.get("neighbor_data", None) if isinstance(test_batch, dict) else None
                         neighbor_mask = test_batch.get("neighbor_mask", None) if isinstance(test_batch, dict) else None
-                        social_margin = getattr(model, "social_margin", 0.04)
+                        social_margin = getattr(model, "social_margin", 0.5)
                         median_trajectory = samples.median(dim=1).values
                         _, S, _, _ = samples.shape
                         trajectories = {

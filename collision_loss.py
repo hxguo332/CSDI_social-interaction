@@ -10,6 +10,7 @@ def compute_collision_loss(
     w_obs: float = 1.0,
     w_clear: float = 0.0,
     margin: float = 0.0,
+    penetration_scale: float = 0.3,
     reduction: str = "mean",
     detach_stats: bool = True
 ) -> Dict[str, torch.Tensor]:
@@ -33,6 +34,8 @@ def compute_collision_loss(
         Weight for the clearance (safe margin) term ReLU(margin - d)^2.
     margin : float, default=0.0
         Desired safety distance from obstacles. Units must match the scale of sdf_fn.
+    penetration_scale : float, default=0.3
+        Penetration depth that produces unit point/path loss.
     reduction : {"mean", "sum", "none"}, default="mean"
         Reduction method for the loss aggregation:
         - "mean": average over masked valid points
@@ -60,9 +63,16 @@ def compute_collision_loss(
     # Query the signed distance field (SDF): d > 0 = free space, d < 0 = inside obstacle
     d = sdf_fn(xy)  # [B, L]
 
-    # Pointwise loss terms
-    L_obs_pt = F.relu(-d) ** 2                      # Penalize penetration (d < 0)
-    L_clear_pt = F.relu(margin - d) ** 2 if w_clear > 0 else torch.zeros_like(d)
+    # Normalize both terms so penetrating by penetration_scale metres or
+    # reaching the obstacle boundary from within the margin has unit loss.
+    penetration_scale = max(float(penetration_scale), 1e-8)
+    clearance_scale = max(float(margin), 1e-8)
+    L_obs_pt = (F.relu(-d) / penetration_scale) ** 2
+    L_clear_pt = (
+        (F.relu(margin - d) / clearance_scale) ** 2 * (d >= 0).to(d.dtype)
+        if w_clear > 0 and margin > 0
+        else torch.zeros_like(d)
+    )
 
     # Apply the time-step mask (only compute loss for imputed time steps)
     mask = ta_time_mask
@@ -110,8 +120,9 @@ def compute_social_collision_loss(
     target_time_mask: torch.Tensor,
     neighbor_xy: torch.Tensor,
     neighbor_mask: torch.Tensor,
+    world_scale: torch.Tensor,
     *,
-    margin: float = 0.04,
+    margin: float = 0.5,
     path_weight: float = 1.0,
     reduction: str = "mean",
 ) -> Dict[str, torch.Tensor]:
@@ -122,12 +133,14 @@ def compute_social_collision_loss(
     target_time_mask: [B, L], steps being optimized/evaluated.
     neighbor_xy: [B, N, L, 2], normalized neighbor trajectories.
     neighbor_mask: [B, N, L], valid neighbor states.
+    world_scale: [B, 2], map width/height in metres.
     """
     assert pred_xy.dim() == 3 and pred_xy.size(-1) == 2
     assert neighbor_xy.dim() == 4 and neighbor_xy.size(-1) == 2
     assert neighbor_mask.shape[:3] == neighbor_xy.shape[:3]
 
-    rel = pred_xy.unsqueeze(1) - neighbor_xy
+    assert world_scale.shape == (pred_xy.shape[0], 2)
+    rel = (pred_xy.unsqueeze(1) - neighbor_xy) * world_scale[:, None, None, :]
     dist = torch.linalg.norm(rel, dim=-1)  # [B, N, L]
     valid_neighbors = neighbor_mask.float() > 0
     valid_time = target_time_mask.float() > 0

@@ -35,7 +35,8 @@ def generate_sdf(
     Returns
     -------
     sdf : np.ndarray, shape (H, W), dtype float32
-        Signed distance field:
+        Signed distance field in pixels when pixel_size is None, otherwise in
+        the physical unit represented by pixel_size:
           +d in free space (distance to nearest obstacle),
           -d inside obstacles/no-go (negative distance to free).
     """
@@ -85,7 +86,7 @@ def generate_sdf(
         dist_to_obst = edt(1 - mask_obst, sampling=pixel_size)
         dist_to_free = edt(mask_obst,     sampling=pixel_size)
 
-    #sdf = dist_to_obst - dist_to_free  # +free, -inside
-    H, W = mask_obst.shape
-    sdf = (dist_to_obst - dist_to_free) / np.sqrt(H**2 + W**2) # normalize to [−1,1] range
+    # Keep the SDF in the unit selected by pixel_size. With pixel_size=0.1,
+    # distances are metres; without it they remain pixels.
+    sdf = dist_to_obst - dist_to_free  # +free, -inside
     return sdf.astype(np.float32)
