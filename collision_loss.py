@@ -29,7 +29,7 @@ def compute_collision_loss(
         A signed distance function: sdf_fn(xy) -> d, where d has shape [B, L].
         Positive values mean inside the free space, negative values mean inside obstacles.
     w_obs : float, default=1.0
-        Weight for the bounded obstacle penetration term.
+        Weight for the bounded softsign obstacle penetration term.
     w_clear : float, default=0.0
         Weight for the clearance (safe margin) term ReLU(margin - d)^2.
     margin : float, default=0.0
@@ -68,7 +68,7 @@ def compute_collision_loss(
     penetration_scale = max(float(penetration_scale), 1e-8)
     clearance_scale = max(float(margin), 1e-8)
     penetration = F.relu(-d) / penetration_scale
-    L_obs_pt = 1.0 - torch.exp(-(penetration ** 2))
+    L_obs_pt = penetration / (1.0 + penetration)
     L_clear_pt = (
         (F.relu(margin - d) / clearance_scale) ** 2 * (d >= 0).to(d.dtype)
         if w_clear > 0 and margin > 0
