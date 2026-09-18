@@ -1190,10 +1190,13 @@ class CSDI_SocialFusionScenmap(CSDI_base):
         side_info,
         is_train,
         set_t=-1,
+        scenmap_scales=None,
         sdf=None,
         neighbor_data=None,
         neighbor_mask=None,
     ):
+        if scenmap_scales is None:
+            raise ValueError("scenmap_scales is required for metre-based social loss")
         B, K, L = observed_data.shape
         t = (torch.ones(B) * set_t).long().to(self.device) if is_train != 1 else torch.randint(0, self.num_steps, [B]).to(self.device)
         current_alpha = self.alpha_torch[t]
@@ -1285,6 +1288,7 @@ class CSDI_SocialFusionScenmap(CSDI_base):
         observed_mask,
         side_info,
         is_train,
+        scenmap_scales=None,
         sdf=None,
         neighbor_data=None,
         neighbor_mask=None,
@@ -1298,6 +1302,7 @@ class CSDI_SocialFusionScenmap(CSDI_base):
                 side_info,
                 is_train,
                 set_t=t,
+                scenmap_scales=scenmap_scales,
                 sdf=sdf,
                 neighbor_data=neighbor_data,
                 neighbor_mask=neighbor_mask,
@@ -1337,6 +1342,7 @@ class CSDI_SocialFusionScenmap(CSDI_base):
             observed_mask,
             side_info,
             is_train,
+            scenmap_scales=scenmap_scales,
             sdf=sdf,
             neighbor_data=neighbor_data,
             neighbor_mask=neighbor_mask,

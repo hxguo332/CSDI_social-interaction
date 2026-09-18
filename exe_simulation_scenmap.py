@@ -195,6 +195,9 @@ def save_config(config, args):
     """Save configuration and args to a folder with timestamp."""
     current_time = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     variant_tag = build_variant_tag(args)
+    pilot_label = config.get("experiment", {}).get("weight_pilot")
+    if pilot_label:
+        variant_tag += f"_weight_{pilot_label}"
     scenario_tag = build_scenario_tag(config, args)
 
     foldername = f"./save/simulation_{variant_tag}_{scenario_tag}_{current_time}/"
