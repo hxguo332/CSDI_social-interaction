@@ -29,13 +29,13 @@ def compute_collision_loss(
         A signed distance function: sdf_fn(xy) -> d, where d has shape [B, L].
         Positive values mean inside the free space, negative values mean inside obstacles.
     w_obs : float, default=1.0
-        Weight for the obstacle penetration term ReLU(-d)^2.
+        Weight for the bounded obstacle penetration term.
     w_clear : float, default=0.0
         Weight for the clearance (safe margin) term ReLU(margin - d)^2.
     margin : float, default=0.0
         Desired safety distance from obstacles. Units must match the scale of sdf_fn.
     penetration_scale : float, default=0.3
-        Penetration depth that produces unit point/path loss.
+        Penetration depth scale for the bounded point/path loss.
     reduction : {"mean", "sum", "none"}, default="mean"
         Reduction method for the loss aggregation:
         - "mean": average over masked valid points
@@ -67,7 +67,8 @@ def compute_collision_loss(
     # reaching the obstacle boundary from within the margin has unit loss.
     penetration_scale = max(float(penetration_scale), 1e-8)
     clearance_scale = max(float(margin), 1e-8)
-    L_obs_pt = (F.relu(-d) / penetration_scale) ** 2
+    penetration = F.relu(-d) / penetration_scale
+    L_obs_pt = 1.0 - torch.exp(-(penetration ** 2))
     L_clear_pt = (
         (F.relu(margin - d) / clearance_scale) ** 2 * (d >= 0).to(d.dtype)
         if w_clear > 0 and margin > 0
