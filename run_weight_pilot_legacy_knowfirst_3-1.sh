@@ -14,12 +14,14 @@ PROJECT_DIR=/home/${USER}/CSDI_social-interaction
 PYTHON=/home/${USER}/csdi_env/bin/python
 
 LABELS=(A B C D)
+OBSTACLE_WEIGHTS=(0.05 0.10 0.20 0.10)
 SOCIAL_WEIGHTS=(0.20 0.20 0.20 0.10)
-CLEARANCE_WEIGHTS=(0.02 0.10 0.20 0.10)
-PATH_WEIGHTS=(0.02 0.20 0.50 0.20)
+CLEARANCE_WEIGHTS=(0.10 0.10 0.10 0.10)
+PATH_WEIGHTS=(0.05 0.10 0.20 0.10)
 
 ID=${SLURM_ARRAY_TASK_ID}
 LABEL=${LABELS[$ID]}
+OBSTACLE_WEIGHT=${OBSTACLE_WEIGHTS[$ID]}
 SOCIAL_WEIGHT=${SOCIAL_WEIGHTS[$ID]}
 CLEARANCE_WEIGHT=${CLEARANCE_WEIGHTS[$ID]}
 PATH_WEIGHT=${PATH_WEIGHTS[$ID]}
@@ -49,7 +51,7 @@ config.setdefault('model', {}).update(
     social_hidden=64,
     social_hidden_dim=64,
     fusionemb=config['model'].get('scenmapemb', 256),
-    collision_loss_weight=0.5,
+    collision_loss_weight=${OBSTACLE_WEIGHT},
     clearance_loss_weight=${CLEARANCE_WEIGHT},
     path_collision_loss_weight=${PATH_WEIGHT},
     social_collision_loss_weight=${SOCIAL_WEIGHT},
@@ -62,7 +64,7 @@ path.parent.mkdir(parents=True, exist_ok=True)
 yaml.safe_dump(config, open(path, 'w'), sort_keys=False)
 PY
 
-echo "Pilot ${LABEL}: social=${SOCIAL_WEIGHT}, clearance=${CLEARANCE_WEIGHT}, path=${PATH_WEIGHT}"
+echo "Pilot ${LABEL}: obstacle=${OBSTACLE_WEIGHT}, social=${SOCIAL_WEIGHT}, clearance=${CLEARANCE_WEIGHT}, path=${PATH_WEIGHT}"
 "$PYTHON" exe_simulation_scenmap.py \
     --config "$CFG" \
     --device cuda:0 \
