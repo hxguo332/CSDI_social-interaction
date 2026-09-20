@@ -1278,6 +1278,22 @@ class CSDI_SocialFusionScenmap(CSDI_base):
                     float(loss.detach()),
                 )
             )
+            if self.add_collision_loss and sdf is not None:
+                with torch.no_grad():
+                    valid_xy = xy[ta_time_mask.bool()]
+                    oob = ((valid_xy < 0) | (valid_xy > 1)).any(dim=-1)
+                    oob_distance = (F.relu(-valid_xy) + F.relu(valid_xy - 1)).sum(dim=-1)
+                    print(
+                        "[collision_diag] t_min={} t_mean={:.1f} t_max={} "
+                        "alpha_min={:.3g} alpha_mean={:.3g} alpha_max={:.3g} "
+                        "x0_min={:.3g} x0_max={:.3g} oob_rate={:.3g} "
+                        "oob_distance_mean={:.3g} inside_rate={:.3g}".format(
+                            int(t.min()), float(t.float().mean()), int(t.max()),
+                            float(current_alpha.min()), float(current_alpha.mean()), float(current_alpha.max()),
+                            float(valid_xy.min()), float(valid_xy.max()), float(oob.float().mean()),
+                            float(oob_distance.mean()), float(col["inside_rate"]),
+                        )
+                    )
         self._loss_log_counter += 1
         return loss
 

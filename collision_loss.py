@@ -111,6 +111,7 @@ def compute_collision_loss(
         "L_obs": L_obs,
         "L_clear": L_clear,
         "L_path": path_penalty,
+        "inside_rate": (((d < 0).to(d.dtype) * mask).sum() / denom).detach(),
     #    "collision_rate": collision_rate.detach() if detach_stats else collision_rate,
     #    "mean_clearance": mean_clearance.detach() if detach_stats else mean_clearance
     }
