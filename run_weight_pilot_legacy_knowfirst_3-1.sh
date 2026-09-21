@@ -58,6 +58,7 @@ config.setdefault('model', {}).update(
     obstacle_clearance_weight=1.0,
     obstacle_clearance_margin=0.3,
     social_margin=0.5,
+    collision_min_alpha=0.5,
 )
 path = Path('config') / '${CFG}'
 path.parent.mkdir(parents=True, exist_ok=True)

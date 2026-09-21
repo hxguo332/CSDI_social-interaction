@@ -990,6 +990,7 @@ class CSDI_SocialFusionScenmap(CSDI_base):
         self.clearance_loss_weight = float(model_cfg.get("clearance_loss_weight", 0.1))
         self.path_collision_loss_weight = float(model_cfg.get("path_collision_loss_weight", 0.2))
         self.social_margin = float(model_cfg.get("social_margin", 0.5))
+        self.collision_min_alpha = float(model_cfg.get("collision_min_alpha", 0.5))
         self.enable_social_branch = bool(model_cfg.get("enable_social_branch", True))
         self.enable_game_fusion = bool(model_cfg.get("enable_game_fusion", True))
 
@@ -1215,11 +1216,13 @@ class CSDI_SocialFusionScenmap(CSDI_base):
         x0_hat = self.estimate_x0_from_xt(noisy_data, predicted, current_alpha)
         xy = torch.stack([x0_hat[:, 0, :], x0_hat[:, 1, :]], dim=-1)
         ta_time_mask = (target_mask.max(dim=1).values > 0).float()
+        reliable_geometry = (current_alpha.reshape(B, -1)[:, 0] >= self.collision_min_alpha).float()
+        geometry_time_mask = ta_time_mask * reliable_geometry.unsqueeze(1)
 
         if self.add_collision_loss and sdf is not None:
             col = compute_collision_loss(
                 xy,
-                ta_time_mask,
+                geometry_time_mask,
                 self.gen_raster_sdf_fn(sdf),
                 w_obs=1,
                 w_clear=self.obstacle_clearance_weight,
@@ -1242,7 +1245,7 @@ class CSDI_SocialFusionScenmap(CSDI_base):
         if self.add_social_collision_loss and neighbor_data is not None and neighbor_mask is not None:
             social_col = compute_social_collision_loss(
                 xy,
-                ta_time_mask,
+                geometry_time_mask,
                 neighbor_data,
                 neighbor_mask,
                 scenmap_scales,
@@ -1283,15 +1286,22 @@ class CSDI_SocialFusionScenmap(CSDI_base):
                     valid_xy = xy[ta_time_mask.bool()]
                     oob = ((valid_xy < 0) | (valid_xy > 1)).any(dim=-1)
                     oob_distance = (F.relu(-valid_xy) + F.relu(valid_xy - 1)).sum(dim=-1)
+                    reliable_xy = xy[geometry_time_mask.bool()]
+                    reliable_oob_rate = (
+                        ((reliable_xy < 0) | (reliable_xy > 1)).any(dim=-1).float().mean()
+                        if reliable_xy.numel() else xy.new_tensor(float("nan"))
+                    )
                     print(
                         "[collision_diag] t_min={} t_mean={:.1f} t_max={} "
                         "alpha_min={:.3g} alpha_mean={:.3g} alpha_max={:.3g} "
                         "x0_min={:.3g} x0_max={:.3g} oob_rate={:.3g} "
-                        "oob_distance_mean={:.3g} inside_rate={:.3g}".format(
+                        "oob_distance_mean={:.3g} reliable_rate={:.3g} "
+                        "reliable_oob_rate={:.3g} inside_rate={:.3g}".format(
                             int(t.min()), float(t.float().mean()), int(t.max()),
                             float(current_alpha.min()), float(current_alpha.mean()), float(current_alpha.max()),
                             float(valid_xy.min()), float(valid_xy.max()), float(oob.float().mean()),
-                            float(oob_distance.mean()), float(col["inside_rate"]),
+                            float(oob_distance.mean()), float(reliable_geometry.mean()),
+                            float(reliable_oob_rate), float(col["inside_rate"]),
                         )
                     )
         self._loss_log_counter += 1

@@ -44,6 +44,7 @@ def _reset_ablation_flags(model_cfg):
     model_cfg.setdefault("clearance_loss_weight", 0.1)
     model_cfg.setdefault("path_collision_loss_weight", 0.2)
     model_cfg.setdefault("social_margin", 0.5)
+    model_cfg.setdefault("collision_min_alpha", 0.5)
 
 
 def configure_variant_legacy(config, variant):
