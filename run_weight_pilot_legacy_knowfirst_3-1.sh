@@ -1,11 +1,11 @@
 #!/bin/bash
-# Four short loss-weight pilots on legacy/know-first/full, scenario 3-1.
+# Three short collision-confidence pilots on legacy/know-first/full, scenario 3-1.
 #SBATCH -A naiss2025-5-659-gpu
 #SBATCH -p gpu
 #SBATCH --gpus=1
 #SBATCH --cpus-per-task=16
 #SBATCH -t 12:00:00
-#SBATCH --array=0-3
+#SBATCH --array=0-2
 #SBATCH -o ./srun_logs/weight_pilot_legacy_knowfirst_3-1_%A_%a.out
 #SBATCH -e ./srun_logs/weight_pilot_legacy_knowfirst_3-1_%A_%a.err
 
@@ -13,18 +13,12 @@ set -euo pipefail
 PROJECT_DIR=/home/${USER}/CSDI_social-interaction
 PYTHON=/home/${USER}/csdi_env/bin/python
 
-LABELS=(A B C D)
-OBSTACLE_WEIGHTS=(0.05 0.10 0.20 0.10)
-SOCIAL_WEIGHTS=(0.20 0.20 0.20 0.10)
-CLEARANCE_WEIGHTS=(0.10 0.10 0.10 0.10)
-PATH_WEIGHTS=(0.05 0.10 0.20 0.10)
+LABELS=(A B C)
+COLLISION_MIN_ALPHAS=(0.50 0.70 0.90)
 
 ID=${SLURM_ARRAY_TASK_ID}
 LABEL=${LABELS[$ID]}
-OBSTACLE_WEIGHT=${OBSTACLE_WEIGHTS[$ID]}
-SOCIAL_WEIGHT=${SOCIAL_WEIGHTS[$ID]}
-CLEARANCE_WEIGHT=${CLEARANCE_WEIGHTS[$ID]}
-PATH_WEIGHT=${PATH_WEIGHTS[$ID]}
+COLLISION_MIN_ALPHA=${COLLISION_MIN_ALPHAS[$ID]}
 CFG="generated_ablation/weight_pilot_${LABEL}_legacy_know_first_3-1_full_len300_b40.yaml"
 
 module purge
@@ -51,21 +45,21 @@ config.setdefault('model', {}).update(
     social_hidden=64,
     social_hidden_dim=64,
     fusionemb=config['model'].get('scenmapemb', 256),
-    collision_loss_weight=${OBSTACLE_WEIGHT},
-    clearance_loss_weight=${CLEARANCE_WEIGHT},
-    path_collision_loss_weight=${PATH_WEIGHT},
-    social_collision_loss_weight=${SOCIAL_WEIGHT},
+    collision_loss_weight=0.10,
+    clearance_loss_weight=0.10,
+    path_collision_loss_weight=0.10,
+    social_collision_loss_weight=0.20,
     obstacle_clearance_weight=1.0,
     obstacle_clearance_margin=0.3,
     social_margin=0.5,
-    collision_min_alpha=0.5,
+    collision_min_alpha=${COLLISION_MIN_ALPHA},
 )
 path = Path('config') / '${CFG}'
 path.parent.mkdir(parents=True, exist_ok=True)
 yaml.safe_dump(config, open(path, 'w'), sort_keys=False)
 PY
 
-echo "Pilot ${LABEL}: obstacle=${OBSTACLE_WEIGHT}, social=${SOCIAL_WEIGHT}, clearance=${CLEARANCE_WEIGHT}, path=${PATH_WEIGHT}"
+echo "Pilot ${LABEL}: collision_min_alpha=${COLLISION_MIN_ALPHA}, obstacle=0.10, social=0.20, clearance=0.10, path=0.10"
 "$PYTHON" exe_simulation_scenmap.py \
     --config "$CFG" \
     --device cuda:0 \
