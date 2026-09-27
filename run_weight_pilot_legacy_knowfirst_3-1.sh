@@ -1,5 +1,5 @@
 #!/bin/bash
-# Three short collision-confidence pilots on legacy/know-first/full, scenario 3-1.
+# Three short social-weight pilots on legacy/know-first/full, scenario 3-1.
 #SBATCH -A naiss2025-5-659-gpu
 #SBATCH -p gpu
 #SBATCH --gpus=1
@@ -14,11 +14,12 @@ PROJECT_DIR=/home/${USER}/CSDI_social-interaction
 PYTHON=/home/${USER}/csdi_env/bin/python
 
 LABELS=(A B C)
-COLLISION_MIN_ALPHAS=(0.50 0.70 0.90)
+SOCIAL_WEIGHTS=(0.10 0.20 0.40)
 
 ID=${SLURM_ARRAY_TASK_ID}
 LABEL=${LABELS[$ID]}
-COLLISION_MIN_ALPHA=${COLLISION_MIN_ALPHAS[$ID]}
+SOCIAL_WEIGHT=${SOCIAL_WEIGHTS[$ID]}
+COLLISION_MIN_ALPHA=0.70
 CFG="generated_ablation/weight_pilot_${LABEL}_legacy_know_first_3-1_full_len300_b40.yaml"
 
 module purge
@@ -48,7 +49,7 @@ config.setdefault('model', {}).update(
     collision_loss_weight=0.10,
     clearance_loss_weight=0.10,
     path_collision_loss_weight=0.10,
-    social_collision_loss_weight=0.20,
+    social_collision_loss_weight=${SOCIAL_WEIGHT},
     obstacle_clearance_weight=1.0,
     obstacle_clearance_margin=0.3,
     social_margin=0.5,
@@ -59,7 +60,7 @@ path.parent.mkdir(parents=True, exist_ok=True)
 yaml.safe_dump(config, open(path, 'w'), sort_keys=False)
 PY
 
-echo "Pilot ${LABEL}: collision_min_alpha=${COLLISION_MIN_ALPHA}, obstacle=0.10, social=0.20, clearance=0.10, path=0.10"
+echo "Pilot ${LABEL}: collision_min_alpha=${COLLISION_MIN_ALPHA}, obstacle=0.10, social=${SOCIAL_WEIGHT}, clearance=0.10, path=0.10"
 "$PYTHON" exe_simulation_scenmap.py \
     --config "$CFG" \
     --device cuda:0 \
